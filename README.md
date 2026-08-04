@@ -1,11 +1,26 @@
-# Codex plugin for Claude Code
+# Codex plugin for Claude Code (community fork)
+
+> **This is an unofficial fork.** It is not built, endorsed, or supported by OpenAI.
+> It is a modified version of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)
+> at **v1.0.6**, maintained by [@zebbern](https://github.com/zebbern). For the official plugin,
+> use upstream. Report issues with this fork here, not to OpenAI.
+>
+> **What this fork changes** (see [CHANGELOG](plugins/codex/CHANGELOG.md) for detail):
+>
+> - `state.json` is written atomically; corrupt or truncated state/job files are quarantined and
+>   rebuilt instead of crashing the CLI.
+> - Windows process cleanup verifies kills via `tasklist`, and the app-server shuts down
+>   synchronously, so sessions no longer leak processes.
+> - `/codex:status` is progress-aware: jobs persist file-change, command-execution, and token-usage
+>   telemetry, and stalled jobs are marked `likely dead`.
+> - Degraded mode is explicit: jobs record whether they ran on the shared runtime or a private
+>   process, and broker fallback warns loudly.
+> - New `/codex:help`; richer `/codex:result` output with a `codex resume <session-id>` handoff.
 
 Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
 
 This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
 they already have.
-
-<video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
 ## What You Get
 
@@ -292,6 +307,10 @@ Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also 
 This way you can review the Codex work or continue the work there.
 
 ## FAQ
+
+### What does the review gate do?
+
+The review gate is an optional per-repository setting. When enabled, the plugin uses a `Stop` hook to run a targeted Codex review of Claude's response before the session ends, and blocks the stop if that review finds issues. It is disabled by default; see [Enabling review gate](#enabling-review-gate) for how to turn it on or off.
 
 ### Do I need a separate Codex account for this plugin?
 

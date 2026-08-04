@@ -1,4 +1,11 @@
 Copyright 2026 OpenAI
+Copyright 2026 zebbern
+
+This product includes software developed by OpenAI
+(https://github.com/openai/codex-plugin-cc).
+
+This is a modified version. See CHANGELOG.md for a description of the changes
+made relative to upstream v1.0.6.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

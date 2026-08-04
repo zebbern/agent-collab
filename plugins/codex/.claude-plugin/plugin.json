@@ -1,8 +1,8 @@
 {
   "name": "codex",
-  "version": "1.0.6",
-  "description": "Use Codex from Claude Code to review code or delegate tasks.",
+  "version": "1.0.6+fork.1",
+  "description": "Use Codex from Claude Code to review code or delegate tasks. Community fork by zebbern.",
   "author": {
-    "name": "OpenAI"
+    "name": "zebbern"
   }
 }

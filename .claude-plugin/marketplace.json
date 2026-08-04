@@ -1,19 +1,19 @@
 {
-  "name": "openai-codex",
+  "name": "codex-collaborate-plugin",
   "owner": {
-    "name": "OpenAI"
+    "name": "zebbern"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.6"
+    "description": "Community fork of the OpenAI Codex plugin for Claude Code, with durability, Windows process-cleanup, and job-progress improvements.",
+    "version": "1.0.6+fork.1"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6",
+      "version": "1.0.6+fork.1",
       "author": {
-        "name": "OpenAI"
+        "name": "zebbern"
       },
       "source": "./plugins/codex"
     }
