@@ -468,9 +468,12 @@ function verifyWindowsTaskkillCleanup(pid, options, runCommandImpl) {
   // Recheck the root pid with tasklist. The recheck only covers the root pid:
   // without identity-tracked process enumeration on Windows, a descendant
   // that survived taskkill /T remains a documented blind spot.
+  // shell: false — runCommand's win32 default routes through Git Bash when
+  // SHELL is set, and MSYS path conversion mangles /FI-style flags.
   const check = runCommandImpl("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
     cwd: options.cwd,
-    env: options.env
+    env: options.env,
+    shell: false
   });
   if (check.error || check.status !== 0) {
     const detail = check.error?.message || check.stderr.trim() || check.stdout.trim() || `exit ${check.status}`;
@@ -590,9 +593,13 @@ export async function terminateProcessTree(pid, options = {}) {
   const ownershipEstablished = Boolean(ownershipSnapshot || expectedRootIdentity || ownershipCaptureFailed);
 
   if (platform === "win32") {
+    // shell: false — under Git Bash (SHELL set), MSYS argument conversion
+    // rewrites /PID into a filesystem path (e.g. "C:/Program Files/Git/PID"),
+    // making taskkill fail with "Invalid argument".
     const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
       cwd: options.cwd,
-      env: options.env
+      env: options.env,
+      shell: false
     });
 
     if (!result.error && result.status === 0) {

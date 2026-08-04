@@ -16,6 +16,10 @@
 > - Degraded mode is explicit: jobs record whether they ran on the shared runtime or a private
 >   process, and broker fallback warns loudly.
 > - New `/codex:help`; richer `/codex:result` output with a `codex resume <session-id>` handoff.
+> - Windows correctness: the broker ownership registry no longer throws on every operation
+>   (POSIX permission checks are gated off win32), registry lock contention handles Windows
+>   `EPERM` rename semantics, `taskkill`/`tasklist` bypass MSYS argument mangling, and the
+>   test suite passes on Windows (upstream fails 9 of its own tests there).
 
 Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
 

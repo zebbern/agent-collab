@@ -27,6 +27,10 @@ import {
 const APPLY_MODE = "apply-registered";
 const REPORT_MODE = "report-only";
 
+// Mirrors broker-ownership.mjs: POSIX mode bits are unrepresentable on Windows
+// (modes read back 0o666), so exact-mode checks apply only off win32.
+const ENFORCE_POSIX_MODES = process.platform !== "win32";
+
 function listRegistrationCandidates(env) {
   const registryRoot = resolveBrokerOwnershipRoot(env);
   if (!registryRoot || !fs.existsSync(registryRoot)) {
@@ -34,7 +38,7 @@ function listRegistrationCandidates(env) {
   }
   try {
     const rootStat = fs.lstatSync(registryRoot);
-    if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || (rootStat.mode & 0o777) !== 0o700) {
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || (ENFORCE_POSIX_MODES && (rootStat.mode & 0o777) !== 0o700)) {
       return [{ valid: false, brokerKey: null, registryDir: registryRoot, reason: "registry-root-invalid" }];
     }
   } catch {
@@ -53,7 +57,7 @@ function listRegistrationCandidates(env) {
     const brokerPath = path.join(registryDir, "broker.json");
     try {
       const brokerStat = fs.lstatSync(brokerPath);
-      if (brokerStat.isSymbolicLink() || !brokerStat.isFile() || (brokerStat.mode & 0o777) !== 0o600) {
+      if (brokerStat.isSymbolicLink() || !brokerStat.isFile() || (ENFORCE_POSIX_MODES && (brokerStat.mode & 0o777) !== 0o600)) {
         throw new Error("broker record is not a private regular file");
       }
       const broker = JSON.parse(fs.readFileSync(brokerPath, "utf8"));

@@ -31,9 +31,15 @@ function isPidIdentity(pid, identity) {
   return isSafePid(pid) && typeof identity === "string" && identity.startsWith(`${pid}@`) && identity.length > String(pid).length + 1;
 }
 
+// POSIX mode bits are meaningless on Windows: chmod is a near-no-op and modes
+// read back as 0o666/0o444, so exact-mode privacy checks can never pass there.
+// On win32 the per-user %LOCALAPPDATA%/plugin-data ACL is the privacy boundary;
+// symlink and file-type checks still apply on every platform.
+const ENFORCE_POSIX_MODES = process.platform !== "win32";
+
 function requirePrivateDirectory(dirPath) {
   const stat = fs.lstatSync(dirPath);
-  if (stat.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o777) !== 0o700) {
+  if (stat.isSymbolicLink() || !stat.isDirectory() || (ENFORCE_POSIX_MODES && (stat.mode & 0o777) !== 0o700)) {
     const error = new Error(`Broker ownership registry directory is not private: ${dirPath}.`);
     error.code = "BROKER_OWNERSHIP_PERMISSIONS";
     throw error;
@@ -43,7 +49,7 @@ function requirePrivateDirectory(dirPath) {
 
 function requirePrivateFile(filePath) {
   const stat = fs.lstatSync(filePath);
-  if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o777) !== 0o600) {
+  if (stat.isSymbolicLink() || !stat.isFile() || (ENFORCE_POSIX_MODES && (stat.mode & 0o777) !== 0o600)) {
     const error = new Error(`Broker ownership registry file is not private: ${filePath}.`);
     error.code = "BROKER_OWNERSHIP_PERMISSIONS";
     throw error;
@@ -234,7 +240,13 @@ export function acquireBrokerRegistryLock(
         fs.renameSync(preparedPath, lockPath);
         return { acquired: true, brokerKey: registration.brokerKey, token, pid, pidIdentity, path: lockPath };
       } catch (error) {
-        if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") {
+        // Windows reports rename-onto-existing-directory as EPERM rather than
+        // EEXIST/ENOTEMPTY; treat it as lock contention, not a fatal error.
+        const contention =
+          error?.code === "EEXIST" ||
+          error?.code === "ENOTEMPTY" ||
+          (process.platform === "win32" && error?.code === "EPERM");
+        if (!contention) {
           throw error;
         }
       }
@@ -291,7 +303,12 @@ export function acquireBrokerRegistryLock(
     try {
       fs.renameSync(lockPath, stalePath);
     } catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "EEXIST" || error?.code === "ENOTEMPTY") {
+      if (
+        error?.code === "ENOENT" ||
+        error?.code === "EEXIST" ||
+        error?.code === "ENOTEMPTY" ||
+        (process.platform === "win32" && error?.code === "EPERM")
+      ) {
         continue;
       }
       return { acquired: false, reason: "registry-lock-quarantine-failed", path: lockPath };

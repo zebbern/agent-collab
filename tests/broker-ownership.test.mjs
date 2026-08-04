@@ -291,7 +291,9 @@ test("owner publication fails closed while cleanup holds the registry lock", (t)
     now: () => "2026-07-27T00:00:30.000Z"
   });
   assert.equal(lock.acquired, true);
-  assert.equal(fs.statSync(lock.path).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(lock.path).mode & 0o777, 0o700);
+  }
 
   const blocked = registerBrokerOwner(
     registration,
@@ -411,7 +413,9 @@ test("registered broker with a live owner is not eligible for cleanup", (t) => {
   assert.equal(assessment.safeToShutdown, false);
   assert.equal(assessment.reason, "live-owner");
   assert.deepEqual(assessment.liveOwners.map((candidate) => candidate.sessionId), ["session-live"]);
-  assert.equal(fs.statSync(owner.path).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(owner.path).mode & 0o777, 0o600);
+  }
 });
 
 test("registered broker is eligible only after every owner is dead or released", (t) => {
@@ -472,6 +476,10 @@ test("malformed owner state blocks cleanup instead of being skipped", (t) => {
 });
 
 test("symlinked or overly permissive registry rows block cleanup", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX permission bits and unprivileged symlinks are required for this contract.");
+    return;
+  }
   const permissiveFixture = makeFixture(t);
   const registered = registerBrokerOwner(permissiveFixture.registration, {
     env: ownerEnv(permissiveFixture.env, "session-permissive", 5450, "Mon Jul 27 00:05:30 2026")
@@ -537,7 +545,9 @@ test("broker child ownership is immutable and identity keyed", (t) => {
 
   assert.equal(first.registered, true);
   assert.equal(second.path, first.path);
-  assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+  }
   assert.deepEqual(JSON.parse(fs.readFileSync(first.path, "utf8")).ownershipSnapshot, childSnapshot);
 
   const refused = releaseBrokerChild(registration, {
@@ -553,7 +563,9 @@ test("broker child ownership is immutable and identity keyed", (t) => {
     now: () => "2026-07-27T00:07:00.000Z"
   });
   assert.equal(released.released, true);
-  assert.equal(fs.statSync(released.path).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(released.path).mode & 0o777, 0o600);
+  }
   const children = loadBrokerChildren(registration);
   assert.equal(children.children.length, 0);
   assert.equal(children.releasedChildren.length, 1);
@@ -622,7 +634,9 @@ test("post-activation child observations extend durable cleanup ownership", (t) 
   });
 
   assert.equal(observed.observed, true);
-  assert.equal(fs.statSync(observed.path).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(observed.path).mode & 0o777, 0o600);
+  }
   const repeated = publishBrokerChildObservation(registration, {
     child: child.child,
     ownershipSnapshot: observed.observation.ownershipSnapshot,

@@ -768,7 +768,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
     return null;
   }
   const env = options.env ?? process.env;
-  if (!resolveBrokerOwnershipRoot(env) || !hasLiveBrokerOwnerIdentity(env)) {
+  const hasLiveOwner = options.hasLiveBrokerOwnerIdentityImpl ?? hasLiveBrokerOwnerIdentity;
+  if (!resolveBrokerOwnershipRoot(env) || !hasLiveOwner(env)) {
     options.onUnavailable?.("session ownership unavailable");
     return null;
   }

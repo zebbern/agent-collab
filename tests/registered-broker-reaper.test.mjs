@@ -172,7 +172,9 @@ test("registered cleanup reclaims children before the broker and writes a mode-0
   ]);
   const receiptPath = summary.results[0].receiptPath;
   assert.ok(receiptPath);
-  assert.equal(fs.statSync(receiptPath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(receiptPath).mode & 0o777, 0o600);
+  }
   assert.equal(JSON.parse(fs.readFileSync(receiptPath, "utf8")).decision, "cleanup-verified");
 
   const receiptNames = fs.readdirSync(path.dirname(receiptPath));
@@ -357,6 +359,10 @@ test("missing and unregistered broker rows never reach a signal path", async (t)
 });
 
 test("an overly permissive registry root is report-only", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix directory permission modes are required for this contract.");
+    return;
+  }
   const { env, registration } = makeFixture(t);
   addReleasedOwner(registration, env);
   const registryRoot = path.dirname(registration.registryDir);

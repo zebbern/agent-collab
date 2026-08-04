@@ -460,6 +460,10 @@ test("background task stays runnable when worker identity capture fails", async 
 });
 
 test("fake app-server crash reclaims an observed regrouped helper without replacement", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix process identities are required for helper ownership cleanup.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -1031,6 +1035,7 @@ test("ensureBrokerSession reports why the shared runtime is unavailable", async 
   const ownershipReasons = [];
   const ownerlessSession = await ensureBrokerSession(repo, {
     env: envWithoutOwner,
+    platform: "linux",
     onUnavailable: (reason) => ownershipReasons.push(reason)
   });
   assert.equal(ownerlessSession, null);
@@ -1039,6 +1044,8 @@ test("ensureBrokerSession reports why the shared runtime is unavailable", async 
   const lockReasons = [];
   const lockedSession = await ensureBrokerSession(repo, {
     env: withBrokerOwner(process.env, "unavailable-reasons"),
+    platform: "linux",
+    hasLiveBrokerOwnerIdentityImpl: () => true,
     async acquireBrokerLaunchLockImpl() {
       const error = new Error("launch lock occupied");
       error.code = "BROKER_LAUNCH_LOCK_TIMEOUT";
@@ -1932,7 +1939,17 @@ test("setup output warns that an enabled review gate is interruptive", () => {
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
-  fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  if (process.platform === "win32") {
+    // Symlinks require elevation on Windows; a hard link (or copy) of the real
+    // node.exe keeps the PATH-restricted fixture working without privileges.
+    try {
+      fs.linkSync(process.execPath, path.join(binDir, "node.exe"));
+    } catch {
+      fs.copyFileSync(process.execPath, path.join(binDir, "node.exe"));
+    }
+  } else {
+    fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  }
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
@@ -2105,6 +2122,7 @@ test("transfer delegates the current Claude session directly to native import", 
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex"),
       CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
     }
@@ -2150,6 +2168,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -2180,6 +2199,7 @@ test("transfer fails visibly when native import completes without a ledger recor
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      USERPROFILE: home,
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -2205,7 +2225,7 @@ test("transfer rejects sources outside the Claude projects directory", () => {
 
   const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
     cwd: repo,
-    env: { ...buildEnv(binDir), HOME: home }
+    env: { ...buildEnv(binDir), HOME: home, USERPROFILE: home }
   });
 
   assert.notEqual(result.status, 0);
@@ -2422,9 +2442,13 @@ test("task run warns once, logs once, and records the direct transport when the 
   });
   assert.equal(result.status, 0, result.stderr);
 
+  // The warn-once/log-once/direct-transport contract is identical everywhere;
+  // only the unavailability reason differs (the shared broker is gated off on
+  // Windows before the ownership check can run).
+  const expectedReason = process.platform === "win32" ? "unsupported on Windows" : "session ownership unavailable";
   const warnings = result.stderr.split(/\r?\n/).filter((line) => line.includes("shared Codex runtime unavailable"));
   assert.deepEqual(warnings, [
-    "Warning: shared Codex runtime unavailable (session ownership unavailable); using a private Codex process."
+    `Warning: shared Codex runtime unavailable (${expectedReason}); using a private Codex process.`
   ]);
 
   const stateDir = resolveStateDir(repo);
@@ -2432,7 +2456,7 @@ test("task run warns once, logs once, and records the direct transport when the 
   const job = state.jobs[0];
   const storedJob = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
   assert.equal(storedJob.result.transport, "direct");
-  assert.equal(storedJob.result.transportReason, "session ownership unavailable");
+  assert.equal(storedJob.result.transportReason, expectedReason);
 
   const logLines = fs.readFileSync(storedJob.logFile, "utf8").split(/\r?\n/).filter((line) => line.includes("shared Codex runtime unavailable"));
   assert.equal(logLines.length, 1);
@@ -2442,7 +2466,7 @@ test("task run warns once, logs once, and records the direct transport when the 
     env: buildEnv(binDir)
   });
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /Transport: private Codex process \(session ownership unavailable\)/);
+  assert.match(status.stdout, new RegExp(`Transport: private Codex process \\(${expectedReason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
 });
 
 test("broker transport runs record the shared transport without a fallback warning", async (t) => {
@@ -3756,7 +3780,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
         status: "running",
         title: "Codex Task",
         pid: sleeper.pid,
-        processIdentity: ownershipSnapshot.rootIdentity,
+        processIdentity: ownershipSnapshot?.rootIdentity ?? null,
         ownershipSnapshot,
         logFile
       },
@@ -3779,7 +3803,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
             jobClass: "task",
             summary: "Investigate flaky test",
             pid: sleeper.pid,
-            processIdentity: ownershipSnapshot.rootIdentity,
+            processIdentity: ownershipSnapshot?.rootIdentity ?? null,
             ownershipSnapshot,
             logFile,
             createdAt: "2026-03-18T15:30:00.000Z",
@@ -4360,7 +4384,11 @@ test("cancel with a job id can still target an active job from another Claude se
   assert.equal(state.jobs[0].status, "cancelled");
 });
 
-test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async () => {
+test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix broker sockets are required for this contract.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -4460,7 +4488,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
       {
         id: "review-running",
         pid: sleeper.pid,
-        processIdentity: ownershipSnapshot.rootIdentity,
+        processIdentity: ownershipSnapshot?.rootIdentity ?? null,
         ownershipSnapshot
       },
       null,
@@ -4503,7 +4531,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
             title: "Codex Review",
             sessionId: "sess-current",
             pid: sleeper.pid,
-            processIdentity: ownershipSnapshot.rootIdentity,
+            processIdentity: ownershipSnapshot?.rootIdentity ?? null,
             ownershipSnapshot,
             logFile: runningLog,
             createdAt: "2026-03-18T15:32:00.000Z",
@@ -4931,6 +4959,10 @@ test("shared broker cleans up an app-server whose initialization returns an RPC 
 });
 
 test("shared broker releases its idle app-server child and restarts it on demand", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix broker sockets are required for this contract.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -5001,7 +5033,11 @@ test("shared broker releases its idle app-server child and restarts it on demand
   assert.equal(fakeState.helperPids.length, 2);
 });
 
-test("identity capture failure prevents app-server activation and reports unverified cleanup", async () => {
+test("identity capture failure prevents app-server activation and reports unverified cleanup", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix process identities are required for identity-capture gating.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
@@ -5053,6 +5089,10 @@ test("a broker-owned app-server cannot activate before durable child publication
 });
 
 test("shared broker keeps active work alive after its client disconnects", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix broker sockets are required for this contract.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
