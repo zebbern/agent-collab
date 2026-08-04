@@ -12,15 +12,20 @@ import net from "node:net";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { ensureBrokerSession, loadReusableBrokerSession } from "./broker-lifecycle.mjs";
+import { captureProcessOwnership, normalizeProcessCleanupOutcome, terminateProcessGroup, terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
+const DEFAULT_CLOSE_WAIT_MS = 2000;
+const GATED_APP_SERVER_CHILD = fileURLToPath(new URL("../app-server-child.mjs", import.meta.url));
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+export const BROKER_OWNERSHIP_RPC_CODE = -32005;
+export const BROKER_STREAM_COMPLETED_METHOD = "broker/stream-completed";
 
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
@@ -63,6 +68,7 @@ class AppServerClientBase {
     this.stderr = "";
     this.closed = false;
     this.exitError = null;
+    this.exitHandler = null;
     /** @type {AppServerNotificationHandler | null} */
     this.notificationHandler = null;
     this.lineBuffer = "";
@@ -75,6 +81,10 @@ class AppServerClientBase {
 
   setNotificationHandler(handler) {
     this.notificationHandler = handler;
+  }
+
+  setExitHandler(handler) {
+    this.exitHandler = handler;
   }
 
   /**
@@ -149,8 +159,12 @@ class AppServerClientBase {
     }
 
     if (message.method && this.notificationHandler) {
-      this.notificationHandler(/** @type {AppServerNotification} */ (message));
+      this.handleNotification(/** @type {AppServerNotification} */ (message));
     }
+  }
+
+  handleNotification(message) {
+    this.notificationHandler?.(message);
   }
 
   handleServerRequest(message) {
@@ -173,6 +187,7 @@ class AppServerClientBase {
     }
     this.pending.clear();
     this.resolveExit(undefined);
+    this.exitHandler?.(this.exitError);
   }
 
   sendMessage(_message) {
@@ -180,21 +195,23 @@ class AppServerClientBase {
   }
 }
 
-class SpawnedCodexAppServerClient extends AppServerClientBase {
+export class SpawnedCodexAppServerClient extends AppServerClientBase {
   constructor(cwd, options = {}) {
     super(cwd, options);
     this.transport = "direct";
+    this.notificationRefreshPromise = Promise.resolve();
   }
 
   async initialize() {
-    this.proc = spawn("codex", ["app-server"], {
+    const gated = this.options.gatedBrokerChild === true && process.platform !== "win32";
+    this.proc = spawn(gated ? process.execPath : "codex", gated ? [GATED_APP_SERVER_CHILD] : ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+      stdio: gated ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true
     });
-
     this.proc.stdout.setEncoding("utf8");
     this.proc.stderr.setEncoding("utf8");
 
@@ -214,6 +231,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
           : createProtocolError(
               `codex app-server exited unexpectedly (${signal ? `signal ${signal}` : `exit ${code}`}).${stderr ? `\n${stderr}` : ""}`
             );
+      if (!this.closed) {
+        this.startUnexpectedExitCleanup(this.proc.pid);
+      }
       this.handleExit(detail);
     });
 
@@ -222,6 +242,32 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleLine(line);
     });
 
+    try {
+      const captureOwnership = this.options.captureProcessOwnershipImpl ?? captureProcessOwnership;
+      this.ownershipSnapshot =
+        process.platform === "win32"
+          ? null
+          : captureOwnership(this.proc.pid, {
+              cwd: this.cwd,
+              env: this.options.env ?? process.env
+            });
+      this.procIdentity = this.ownershipSnapshot?.rootIdentity ?? null;
+    } catch (error) {
+      this.identityCaptureFailed = true;
+      throw error;
+    }
+    if (process.platform !== "win32" && !this.procIdentity) {
+      this.identityCaptureFailed = true;
+      throw new Error("Unable to capture codex app-server process identity.");
+    }
+    if (gated) {
+      await this.options.beforeAppServerActivation?.(this.ownershipSnapshot);
+      const activationControl = this.proc.stdio?.[3];
+      if (!activationControl) {
+        throw new Error("Codex app-server activation control is unavailable.");
+      }
+      activationControl.end("activate\n");
+    }
     await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
@@ -229,40 +275,223 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     this.notify("initialized", {});
   }
 
+  mergeOwnershipSnapshot(observation) {
+    if (
+      !observation?.rootIdentity ||
+      observation.rootIdentity !== this.procIdentity ||
+      observation.rootPid !== this.ownershipSnapshot?.rootPid
+    ) {
+      throw new Error("Codex app-server ownership identity changed while refreshing its helper tree.");
+    }
+    const members = new Map();
+    for (const snapshot of [this.ownershipSnapshot, observation]) {
+      for (const member of snapshot?.members ?? []) {
+        members.set(member.identity, member);
+      }
+    }
+    this.ownershipSnapshot = {
+      ...observation,
+      members: [...members.values()]
+    };
+    return this.ownershipSnapshot;
+  }
+
+  async refreshOwnership() {
+    if (process.platform === "win32" || !this.procIdentity || !this.proc?.pid) {
+      return this.ownershipSnapshot ?? null;
+    }
+    const captureOwnership = this.options.captureProcessOwnershipImpl ?? captureProcessOwnership;
+    const observation = captureOwnership(this.proc.pid, {
+      cwd: this.cwd,
+      env: this.options.env ?? process.env
+    });
+    const ownershipSnapshot = this.mergeOwnershipSnapshot(observation);
+    await this.options.afterAppServerOwnershipRefresh?.(ownershipSnapshot);
+    return ownershipSnapshot;
+  }
+
+  handleNotification(message) {
+    this.notificationRefreshPromise = this.notificationRefreshPromise.then(async () => {
+      if (this.exitResolved) {
+        return;
+      }
+      try {
+        // Streaming requests return before their turn is complete. Publish a
+        // fresh helper observation before forwarding each later notification
+        // so independently grouped helpers are durable before a crash can
+        // strand them outside both local and registered cleanup.
+        await this.refreshOwnership();
+      } catch (error) {
+        this.startUnexpectedExitCleanup(this.proc?.pid);
+        this.handleExit(error);
+        return;
+      }
+      if (!this.closed) {
+        this.notificationHandler?.(message);
+      }
+    });
+    return this.notificationRefreshPromise;
+  }
+
+  async request(method, params) {
+    let result;
+    let requestError;
+    try {
+      result = await super.request(method, params);
+    } catch (error) {
+      requestError = error;
+    }
+    // Helpers may be created only after the gated wrapper is activated. Take
+    // and durably publish a fresh identity snapshot at every request boundary
+    // before the broker exposes the response or error to its caller.
+    await this.refreshOwnership();
+    if (requestError) {
+      throw requestError;
+    }
+    return result;
+  }
+
+  startUnexpectedExitCleanup(pid) {
+    if (
+      this.unexpectedExitCleanupPromise ||
+      process.platform === "win32" ||
+      !Number.isFinite(pid) ||
+      !this.ownershipSnapshot?.rootIdentity
+    ) {
+      return this.unexpectedExitCleanupPromise ?? null;
+    }
+
+    const observationBarrier = this.notificationRefreshPromise ?? Promise.resolve();
+    this.unexpectedExitCleanupPromise = observationBarrier
+      .catch(() => {})
+      .then(() => terminateProcessGroup(pid, {
+        ownershipSnapshot: this.ownershipSnapshot,
+        cwd: this.cwd,
+        env: this.options.env ?? process.env,
+        warnImpl: () => {}
+      }))
+      .then((outcome) => {
+        this.cleanupOutcome = normalizeProcessCleanupOutcome(outcome);
+        if (!outcome.verified) {
+          process.stderr.write(
+            `Warning: unable to verify crashed codex app-server group cleanup; surviving PIDs: ${outcome.survivors?.join(", ") || "none known"}.\n`
+          );
+        }
+        return this.cleanupOutcome;
+      })
+      .catch((error) => {
+        this.cleanupOutcome = normalizeProcessCleanupOutcome({
+          attempted: true,
+          delivered: false,
+          verified: false,
+          degraded: true,
+          method: "process-group",
+          survivors: [],
+          survivorIdentities: []
+        });
+        process.stderr.write(`Warning: crashed codex app-server group cleanup failed: ${error.message}.\n`);
+        return this.cleanupOutcome;
+      });
+    return this.unexpectedExitCleanupPromise;
+  }
+
+  waitForUnexpectedExitCleanup() {
+    return this.unexpectedExitCleanupPromise ?? null;
+  }
+
   async close() {
     if (this.closed) {
-      await this.exitPromise;
+      await this.waitForExit();
       return;
     }
 
     this.closed = true;
 
+    await this.notificationRefreshPromise?.catch(() => {});
+
     if (this.readline) {
       this.readline.close();
     }
 
-    if (this.proc && !this.proc.killed) {
-      this.proc.stdin.end();
-      setTimeout(() => {
-        if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
-          // On Windows with shell: true, the direct child is cmd.exe.
-          // Use terminateProcessTree to kill the entire tree including
-          // the grandchild node process.
-          if (process.platform === "win32") {
-            try {
-              terminateProcessTree(this.proc.pid);
-            } catch {
-              // Best-effort cleanup inside an unref'd timer — swallow errors
-              // to avoid crashing the host process during shutdown.
+    if (this.proc) {
+      this.proc.stdio?.[3]?.end?.();
+      try {
+        this.proc.stdin.end();
+      } catch {
+        // The child may have closed its input before cleanup began.
+      }
+      const terminate = this.options.terminateProcessTreeImpl ?? terminateProcessTree;
+      const platform = this.options.platform ?? process.platform;
+      if (platform === "win32") {
+        // Terminate synchronously during close. An unref'd timer never fires
+        // when the companion exits immediately, orphaning the app-server
+        // child; taskkill runs synchronously so there is no reason to defer.
+        if (!this.proc.killed && this.proc.exitCode === null) {
+          try {
+            const outcome = await terminate(this.proc.pid, {
+              platform,
+              expectedRootIdentity: this.procIdentity,
+              ownershipSnapshot: this.ownershipSnapshot,
+              requireVerifiedOwnership: this.identityCaptureFailed,
+              ownerHoldsLiveHandle: true,
+              runCommandImpl: this.options.runCommandImpl,
+              warnImpl: () => {}
+            });
+            this.cleanupOutcome = normalizeProcessCleanupOutcome(outcome);
+            if (!outcome.verified) {
+              process.stderr.write(
+                `Warning: unable to verify codex app-server cleanup; surviving PIDs: ${outcome.survivors?.join(", ") || "none known"}.\n`
+              );
             }
-          } else {
-            this.proc.kill("SIGTERM");
+          } catch {
+            // Best-effort cleanup during shutdown — swallow errors to avoid
+            // crashing the host process.
           }
         }
-      }, 50).unref?.();
+      } else {
+        // The app-server is its own process-group leader on Unix. Terminate
+        // the group so MCP helpers cannot outlive the app-server parent.
+        if (this.unexpectedExitCleanupPromise) {
+          await this.unexpectedExitCleanupPromise;
+        } else {
+          const outcome = await terminate(this.proc.pid, {
+            expectedRootIdentity: this.procIdentity,
+            ownershipSnapshot: this.ownershipSnapshot,
+            requireVerifiedOwnership: this.identityCaptureFailed,
+            ownerHoldsLiveHandle: true,
+            directKillImpl: (signal) => this.proc.kill(signal),
+            warnImpl: () => {}
+          });
+          this.cleanupOutcome = normalizeProcessCleanupOutcome(outcome);
+          if (!outcome.verified) {
+            process.stderr.write(
+              `Warning: unable to verify codex app-server cleanup; surviving PIDs: ${outcome.survivors?.join(", ") || "none known"}.\n`
+            );
+          }
+        }
+      }
     }
 
-    await this.exitPromise;
+    const exited = await this.waitForExit();
+    if (!exited) {
+      this.cleanupOutcome = normalizeProcessCleanupOutcome({
+        ...(this.cleanupOutcome ?? {}),
+        attempted: true,
+        verified: false,
+        degraded: true
+      });
+    }
+  }
+
+  async waitForExit() {
+    const timeoutMs = Number.isFinite(this.options.closeWaitMs) ? this.options.closeWaitMs : DEFAULT_CLOSE_WAIT_MS;
+    let timeout;
+    const timedOut = new Promise((resolve) => {
+      timeout = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const exited = await Promise.race([this.exitPromise.then(() => true), timedOut]);
+    clearTimeout(timeout);
+    return exited;
   }
 
   sendMessage(message) {
@@ -335,20 +564,46 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 export class CodexAppServerClient {
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
+    let transportFallback = null;
     if (!options.disableBroker) {
       brokerEndpoint = options.brokerEndpoint ?? options.env?.[BROKER_ENDPOINT_ENV] ?? process.env[BROKER_ENDPOINT_ENV] ?? null;
       if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = loadBrokerSession(cwd)?.endpoint ?? null;
+        brokerEndpoint = loadReusableBrokerSession(cwd, options.env ?? process.env)?.endpoint ?? null;
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
-        const brokerSession = await ensureBrokerSession(cwd, { env: options.env });
+        const brokerSession = await ensureBrokerSession(cwd, {
+          env: options.env,
+          onUnavailable: (reason) => {
+            transportFallback = reason;
+          }
+        });
         brokerEndpoint = brokerSession?.endpoint ?? null;
+        if (!brokerEndpoint) {
+          transportFallback ??= "broker unavailable";
+        }
       }
     }
     const client = brokerEndpoint
       ? new BrokerCodexAppServerClient(cwd, { ...options, brokerEndpoint })
       : new SpawnedCodexAppServerClient(cwd, options);
-    await client.initialize();
-    return client;
+    client.transportFallback = transportFallback;
+    try {
+      await client.initialize();
+      return client;
+    } catch (error) {
+      try {
+        await client.close();
+      } catch {
+        client.cleanupOutcome = {
+          verified: false,
+          survivors: [],
+          degraded: true
+        };
+      }
+      if (client.cleanupOutcome?.verified === false) {
+        error.cleanupOutcome = client.cleanupOutcome;
+      }
+      throw error;
+    }
   }
 }

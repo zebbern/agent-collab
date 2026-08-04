@@ -54,6 +54,9 @@ export interface CodexAppServerClientOptions {
   brokerEndpoint?: string;
   disableBroker?: boolean;
   reuseExistingBroker?: boolean;
+  gatedBrokerChild?: boolean;
+  beforeAppServerActivation?: (ownershipSnapshot: unknown) => void | Promise<void>;
+  afterAppServerOwnershipRefresh?: (ownershipSnapshot: unknown) => void | Promise<void>;
 }
 
 export interface AppServerMethodMap {
@@ -66,6 +69,7 @@ export interface AppServerMethodMap {
   "review/start": { params: ReviewStartParams; result: ReviewStartResponse };
   "turn/start": { params: TurnStartParams; result: TurnStartResponse };
   "turn/interrupt": { params: TurnInterruptParams; result: TurnInterruptResponse };
+  "broker/stream-completed": { params: { threadId: string; turnId: string | null }; result: Record<string, never> };
 }
 
 export type AppServerMethod = keyof AppServerMethodMap;

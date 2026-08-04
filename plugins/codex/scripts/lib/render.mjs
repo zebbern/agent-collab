@@ -82,7 +82,8 @@ function isStructuredReviewStoredResult(storedJob) {
 }
 
 function formatJobLine(job) {
-  const parts = [job.id, `${job.status || "unknown"}`];
+  const statusLabel = job.liveness ? `${job.status || "unknown"} (${job.liveness})` : `${job.status || "unknown"}`;
+  const parts = [job.id, statusLabel];
   if (job.kindLabel) {
     parts.push(job.kindLabel);
   }
@@ -106,6 +107,21 @@ function formatCodexResumeCommand(job) {
   return `codex resume ${job.threadId}`;
 }
 
+function formatSessionFooter(threadId) {
+  if (!threadId) {
+    return null;
+  }
+  return `Codex session ID: ${threadId}\nResume in Codex: codex resume ${threadId}`;
+}
+
+function pushSessionFooter(lines, threadId) {
+  const footer = formatSessionFooter(threadId);
+  if (!footer) {
+    return;
+  }
+  lines.push("", ...footer.split("\n"));
+}
+
 function appendActiveJobsTable(lines, jobs) {
   lines.push("Active jobs:");
   lines.push("| Job | Kind | Status | Phase | Elapsed | Codex Session ID | Summary | Actions |");
@@ -115,8 +131,9 @@ function appendActiveJobsTable(lines, jobs) {
     if (job.status === "queued" || job.status === "running") {
       actions.push(`/codex:cancel ${job.id}`);
     }
+    const statusCell = job.liveness ? `${job.status} (${job.liveness})` : job.status;
     lines.push(
-      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
+      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(statusCell)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
     );
   }
 }
@@ -128,6 +145,11 @@ function pushJobDetails(lines, job, options = {}) {
   }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
+  }
+  if (job.transport) {
+    const transportLabel =
+      job.transport === "broker" ? "shared Codex runtime" : job.transport === "direct" ? "private Codex process" : job.transport;
+    lines.push(`  Transport: ${transportLabel}${job.transportReason ? ` (${job.transportReason})` : ""}`);
   }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
@@ -154,6 +176,12 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
     lines.push("  Review changes: /codex:review --wait");
     lines.push("  Stricter review: /codex:adversarial-review --wait");
+  }
+  if (job.progressSignals?.length) {
+    lines.push("  Progress signals:");
+    for (const line of job.progressSignals) {
+      lines.push(`    ${line}`);
+    }
   }
   if (job.progressPreview?.length) {
     lines.push("  Progress:");
@@ -186,7 +214,12 @@ export function renderSetupReport(report) {
     `- codex: ${report.codex.detail}`,
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
-    `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    ...(report.platform === "win32"
+      ? ["- process cleanup: reduced safety on Windows (taskkill-based; no identity-verified tree kills)"]
+      : []),
+    report.reviewGateEnabled
+      ? "- review gate: enabled (interruptive: runs a Codex review before every session stop and can add minutes; disable with `/codex:setup --disable-review-gate`)"
+      : "- review gate: disabled",
     ""
   ];
 
@@ -223,6 +256,7 @@ export function renderReviewResult(parsedResult, meta) {
     }
 
     appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
+    pushSessionFooter(lines, meta.threadId);
 
     return `${lines.join("\n").trimEnd()}\n`;
   }
@@ -243,6 +277,7 @@ export function renderReviewResult(parsedResult, meta) {
     }
 
     appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
+    pushSessionFooter(lines, meta.threadId);
 
     return `${lines.join("\n").trimEnd()}\n`;
   }
@@ -281,6 +316,7 @@ export function renderReviewResult(parsedResult, meta) {
   }
 
   appendReasoningSection(lines, meta.reasoningSummary);
+  pushSessionFooter(lines, meta.threadId);
 
   return `${lines.join("\n").trimEnd()}\n`;
 }
@@ -308,18 +344,21 @@ export function renderNativeReviewResult(result, meta) {
   }
 
   appendReasoningSection(lines, meta.reasoningSummary);
+  pushSessionFooter(lines, meta.threadId);
 
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderTaskResult(parsedResult, meta) {
+export function renderTaskResult(parsedResult, meta = {}) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  const footer = formatSessionFooter(meta.threadId);
   if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    return footer ? `${output}\n${footer}\n` : output;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${message}\n`;
+  return footer ? `${message}\n\n${footer}\n` : `${message}\n`;
 }
 
 export function renderStatusReport(report) {
@@ -387,15 +426,48 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+const MAX_STORED_RESULT_FILES = 20;
+
+function appendStoredResultExtras(lines, storedResult) {
+  const touchedFiles = Array.isArray(storedResult?.touchedFiles)
+    ? storedResult.touchedFiles.filter((file) => typeof file === "string" && file.trim())
+    : [];
+  if (touchedFiles.length > 0) {
+    lines.push("", "Files changed:");
+    for (const file of touchedFiles.slice(0, MAX_STORED_RESULT_FILES)) {
+      lines.push(`- ${file}`);
+    }
+    if (touchedFiles.length > MAX_STORED_RESULT_FILES) {
+      lines.push(`- ... and ${touchedFiles.length - MAX_STORED_RESULT_FILES} more`);
+    }
+  }
+
+  appendReasoningSection(lines, storedResult?.reasoningSummary);
+}
+
+function formatStoredResultFollowUp(job) {
+  return `Next: /codex:status ${job.id} for job details, or /codex:review --wait to review the changes.`;
+}
+
+function appendStoredResultTail(output, job, storedJob, options = {}) {
+  const threadId = storedJob?.threadId ?? job.threadId ?? null;
+  const lines = [];
+  if (options.includeExtras) {
+    appendStoredResultExtras(lines, storedJob?.result);
+  }
+  if (threadId && !output.includes(`Codex session ID: ${threadId}`)) {
+    pushSessionFooter(lines, threadId);
+  }
+  lines.push("", formatStoredResultFollowUp(job));
+  return `${output}\n${lines.join("\n").trim()}\n`;
+}
+
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return appendStoredResultTail(output, job, storedJob);
   }
 
   const rawOutput =
@@ -404,18 +476,12 @@ export function renderStoredJobResult(job, storedJob) {
     "";
   if (rawOutput) {
     const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return appendStoredResultTail(output, job, storedJob, { includeExtras: true });
   }
 
   if (storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return appendStoredResultTail(output, job, storedJob, { includeExtras: true });
   }
 
   const lines = [
@@ -441,6 +507,8 @@ export function renderStoredJobResult(job, storedJob) {
   } else {
     lines.push("", "No captured result payload was stored for this job.");
   }
+
+  lines.push("", formatStoredResultFollowUp(job));
 
   return `${lines.join("\n").trimEnd()}\n`;
 }

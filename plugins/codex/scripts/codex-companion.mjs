@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
@@ -24,7 +24,7 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, getProcessIdentity, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -32,6 +32,7 @@ import {
   listJobs,
   setConfig,
   upsertJob,
+  writeCancelFlag,
   writeJobFile
 } from "./lib/state.mjs";
 import {
@@ -71,19 +72,36 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const MAX_TELEMETRY_ITEMS = 100;
+
+export function boundTelemetryItems(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length <= MAX_TELEMETRY_ITEMS) {
+    return list;
+  }
+  const half = Math.floor(MAX_TELEMETRY_ITEMS / 2);
+  return [...list.slice(0, half), { truncated: list.length - MAX_TELEMETRY_ITEMS }, ...list.slice(-half)];
+}
 
 function printUsage() {
   console.log(
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
+      "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json] [focus text]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--prompt-file <path>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
+      "  node scripts/codex-companion.mjs status [job-id] [--wait] [--timeout-ms <ms>] [--poll-interval-ms <ms>] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/codex-companion.mjs task-resume-candidate [--json]",
+      "  node scripts/codex-companion.mjs task-worker --job-id <id> (internal)",
+      "  node scripts/codex-companion.mjs help",
+      "",
+      "Notes:",
+      "  - task also accepts the prompt from piped stdin; --model spark maps to gpt-5.3-codex-spark.",
+      "  - every subcommand accepts --cwd <path> (alias -C)."
     ].join("\n")
   );
 }
@@ -207,6 +225,7 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    platform: process.platform,
     actionsTaken,
     nextSteps
   };
@@ -390,7 +409,12 @@ async function executeReviewRun(request) {
         stdout: result.reviewText,
         stderr: result.stderr
       },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
+      {
+        reviewLabel: reviewName,
+        targetLabel: target.label,
+        reasoningSummary: result.reasoningSummary,
+        threadId: result.threadId
+      }
     );
 
     return {
@@ -448,7 +472,8 @@ async function executeReviewRun(request) {
     rendered: renderReviewResult(parsed, {
       reviewLabel: reviewName,
       targetLabel: context.target.label,
-      reasoningSummary: result.reasoningSummary
+      reasoningSummary: result.reasoningSummary,
+      threadId: result.threadId
     }),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
@@ -505,7 +530,8 @@ async function executeTaskRun(request) {
     {
       title: taskMetadata.title,
       jobId: request.jobId ?? null,
-      write: Boolean(request.write)
+      write: Boolean(request.write),
+      threadId: result.threadId
     }
   );
   const payload = {
@@ -513,7 +539,12 @@ async function executeTaskRun(request) {
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    fileChanges: boundTelemetryItems(result.fileChanges),
+    commandExecutions: boundTelemetryItems(result.commandExecutions),
+    tokenUsage: result.turn?.tokenUsage ?? null,
+    transport: result.transport ?? null,
+    transportReason: result.transportReason ?? null
   };
 
   return {
@@ -681,21 +712,60 @@ function spawnDetachedTaskWorker(cwd, jobId) {
   return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+function recordTaskWorkerSpawnFailure(workspaceRoot, jobId, error) {
+  const storedJob = readStoredJob(workspaceRoot, jobId);
+  if (!storedJob || storedJob.status !== "queued" || storedJob.pid != null) {
+    return;
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const completedAt = nowIso();
+  const failedRecord = {
+    ...storedJob,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage,
+    completedAt
+  };
+  writeJobFile(workspaceRoot, jobId, failedRecord);
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage,
+    completedAt
+  });
+  appendLogLine(storedJob.logFile, `Worker spawn failed: ${errorMessage}`);
+}
+
+export function enqueueBackgroundTask(cwd, job, request, dependencies = {}) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  const spawnWorker = dependencies.spawnDetachedTaskWorkerImpl ?? spawnDetachedTaskWorker;
+  let worker;
+  try {
+    worker = spawnWorker(cwd, job.id);
+  } catch (error) {
+    recordTaskWorkerSpawnFailure(job.workspaceRoot, job.id, error);
+    throw error;
+  }
+  worker?.once?.("error", (error) => {
+    recordTaskWorkerSpawnFailure(job.workspaceRoot, job.id, error);
+  });
 
   return {
     payload: {
@@ -835,7 +905,7 @@ async function handleTransfer(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
-async function handleTaskWorker(argv) {
+export async function handleTaskWorker(argv, dependencies = {}) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
   });
@@ -851,6 +921,20 @@ async function handleTaskWorker(argv) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
   }
 
+  const {
+    processIdentity: _storedProcessIdentity,
+    ownershipSnapshot: _storedOwnershipSnapshot,
+    ownershipCaptureFailed: _storedOwnershipCaptureFailed,
+    ...storedTask
+  } = storedJob;
+  let workerOwnership;
+  try {
+    const processIdentity = (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid);
+    workerOwnership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
+  } catch {
+    workerOwnership = { ownershipCaptureFailed: true };
+  }
+
   const request = storedJob.request;
   if (!request || typeof request !== "object") {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
@@ -858,18 +942,19 @@ async function handleTaskWorker(argv) {
 
   const { logFile, progress } = createTrackedProgress(
     {
-      ...storedJob,
+      ...storedTask,
       workspaceRoot
     },
     {
       logFile: storedJob.logFile ?? null
     }
   );
-  await runTrackedJob(
+  await (dependencies.runTrackedJobImpl ?? runTrackedJob)(
     {
-      ...storedJob,
+      ...storedTask,
       workspaceRoot,
-      logFile
+      logFile,
+      ...workerOwnership
     },
     () =>
       executeTaskRun({
@@ -960,35 +1045,12 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
-async function handleCancel(argv) {
-  const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd"],
-    booleanOptions: ["json"]
-  });
-
-  const cwd = resolveCommandCwd(options);
-  const reference = positionals[0] ?? "";
-  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
-  const threadId = existing.threadId ?? job.threadId ?? null;
-  const turnId = existing.turnId ?? job.turnId ?? null;
-
-  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
-  if (interrupt.attempted) {
-    appendLogLine(
-      job.logFile,
-      interrupt.interrupted
-        ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
-        : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
-    );
-  }
-
-  terminateProcessTree(job.pid ?? Number.NaN);
-  appendLogLine(job.logFile, "Cancelled by user.");
+function finishCancelledJob(workspaceRoot, record, interrupt, options) {
+  appendLogLine(record.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();
   const nextJob = {
-    ...job,
+    ...record,
     status: "cancelled",
     phase: "cancelled",
     pid: null,
@@ -996,13 +1058,12 @@ async function handleCancel(argv) {
     errorMessage: "Cancelled by user."
   };
 
-  writeJobFile(workspaceRoot, job.id, {
-    ...existing,
+  writeJobFile(workspaceRoot, record.id, {
     ...nextJob,
     cancelledAt: completedAt
   });
   upsertJob(workspaceRoot, {
-    id: job.id,
+    id: record.id,
     status: "cancelled",
     phase: "cancelled",
     pid: null,
@@ -1011,14 +1072,91 @@ async function handleCancel(argv) {
   });
 
   const payload = {
-    jobId: job.id,
+    jobId: record.id,
     status: "cancelled",
-    title: job.title,
+    title: record.title,
     turnInterruptAttempted: interrupt.attempted,
     turnInterrupted: interrupt.interrupted
   };
 
   outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+}
+
+export async function handleCancel(argv, dependencies = {}) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
+  let existing = readStoredJob(workspaceRoot, job.id) ?? {};
+  let record = { ...job, ...existing };
+
+  if (!Number.isFinite(record.pid)) {
+    writeCancelFlag(workspaceRoot, job.id);
+    existing = readStoredJob(workspaceRoot, job.id) ?? existing;
+    record = { ...job, ...existing };
+    if (!Number.isFinite(record.pid)) {
+      finishCancelledJob(
+        workspaceRoot,
+        record,
+        { attempted: false, interrupted: false },
+        options
+      );
+      return;
+    }
+  }
+
+  const threadId = record.threadId ?? null;
+  const turnId = record.turnId ?? null;
+
+  const interrupt = await (dependencies.interruptAppServerTurnImpl ?? interruptAppServerTurn)(cwd, { threadId, turnId });
+  if (interrupt.attempted) {
+    appendLogLine(
+      record.logFile,
+      interrupt.interrupted
+        ? `Requested Codex turn interrupt for ${turnId} on ${threadId}.`
+        : `Codex turn interrupt failed${interrupt.detail ? `: ${interrupt.detail}` : "."}`
+    );
+  }
+
+  const expectedRootIdentity = existing.processIdentity ?? null;
+  const ownershipCaptureFailed = existing.ownershipCaptureFailed === true;
+  const cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
+    expectedRootIdentity,
+    ownershipSnapshot: null,
+    requireVerifiedOwnership: ownershipCaptureFailed,
+    priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
+  });
+  if (cleanupOutcome?.verified !== true) {
+    const failureMessage =
+      ownershipCaptureFailed && !expectedRootIdentity
+        ? `Job ${job.id} could not be verified as owned and was left alone.`
+        : `Unable to verify cleanup for ${job.id}; ownership records were preserved for retry.`;
+    appendLogLine(record.logFile, failureMessage);
+    const recoveryRecord = {
+      ...record,
+      status: record.status,
+      phase: "cleanup-pending",
+      pid: record.pid,
+      cleanupOutcome,
+      cleanupFailure: failureMessage
+    };
+    writeJobFile(workspaceRoot, job.id, recoveryRecord);
+    upsertJob(workspaceRoot, {
+      id: job.id,
+      status: record.status,
+      phase: "cleanup-pending",
+      pid: record.pid,
+      cleanupOutcome,
+      cleanupFailure: failureMessage
+    });
+    throw new Error(failureMessage);
+  }
+
+  finishCancelledJob(workspaceRoot, record, interrupt, options);
 }
 
 async function main() {
@@ -1066,8 +1204,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}

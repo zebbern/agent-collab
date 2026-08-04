@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { hasCancelFlag, readJobFile, removeCancelFlag, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
+const JOB_CANCELLED_CODE = "JOB_CANCELLED";
 
 export function nowIso() {
   return new Date().toISOString();
@@ -139,6 +140,13 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+function createJobCancelledError(jobId) {
+  const error = new Error(`Job ${jobId} was cancelled before execution.`);
+  error.name = "JobCancelledError";
+  error.code = JOB_CANCELLED_CODE;
+  return error;
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const runningRecord = {
     ...job,
@@ -152,6 +160,9 @@ export async function runTrackedJob(job, runner, options = {}) {
   upsertJob(job.workspaceRoot, runningRecord);
 
   try {
+    if (hasCancelFlag(job.workspaceRoot, job.id)) {
+      throw createJobCancelledError(job.id);
+    }
     const execution = await runner();
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
@@ -182,10 +193,11 @@ export async function runTrackedJob(job, runner, options = {}) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
+    const terminalStatus = error?.code === JOB_CANCELLED_CODE ? "cancelled" : "failed";
     writeJobFile(job.workspaceRoot, job.id, {
       ...existing,
-      status: "failed",
-      phase: "failed",
+      status: terminalStatus,
+      phase: terminalStatus,
       errorMessage,
       pid: null,
       completedAt,
@@ -193,12 +205,18 @@ export async function runTrackedJob(job, runner, options = {}) {
     });
     upsertJob(job.workspaceRoot, {
       id: job.id,
-      status: "failed",
-      phase: "failed",
+      status: terminalStatus,
+      phase: terminalStatus,
       pid: null,
       errorMessage,
       completedAt
     });
+    if (terminalStatus === "cancelled") {
+      // The worker has now durably acknowledged the cancellation. Until this
+      // point the tombstone must survive state pruning so a worker that read
+      // the queued request cannot cross the read-to-start race.
+      removeCancelFlag(job.workspaceRoot, job.id);
+    }
     throw error;
   }
 }

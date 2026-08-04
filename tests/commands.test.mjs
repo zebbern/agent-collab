@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -75,6 +76,7 @@ test("continue is not exposed as a user-facing command", () => {
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
     "cancel.md",
+    "help.md",
     "rescue.md",
     "result.md",
     "review.md",
@@ -82,6 +84,36 @@ test("continue is not exposed as a user-facing command", () => {
     "status.md",
     "transfer.md"
   ]);
+});
+
+test("help command runs the companion help inline and returns it verbatim", () => {
+  const source = read("commands/help.md");
+  assert.match(source, /disable-model-invocation:\s*true/);
+  assert.match(source, /allowed-tools: Bash\(node:\*\)/);
+  assert.match(source, /!`node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" help`/);
+  assert.match(source, /Present the full command output to the user exactly as returned/i);
+  assert.match(source, /Do not summarize or condense it/i);
+});
+
+test("companion help and --help document every subcommand and the real flags", () => {
+  const script = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
+  for (const args of [["help"], ["--help"]]) {
+    const result = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\bsetup \[--enable-review-gate\|--disable-review-gate\] \[--json\]/);
+    assert.match(result.stdout, /\breview \[--wait\|--background\] \[--base <ref>\] \[--scope <auto\|working-tree\|branch>\] \[--model <model>\] \[--json\]/);
+    assert.match(result.stdout, /\badversarial-review .* \[focus text\]/);
+    assert.match(result.stdout, /\btask .*--resume-last\|--resume\|--fresh/);
+    assert.match(result.stdout, /\btask .*--model <model\|spark>/);
+    assert.match(result.stdout, /\btask .*--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
+    assert.match(result.stdout, /\btask .*--prompt-file <path>/);
+    assert.match(result.stdout, /\bstatus \[job-id\] \[--wait\] \[--timeout-ms <ms>\] \[--poll-interval-ms <ms>\] \[--all\] \[--json\]/);
+    assert.match(result.stdout, /\bresult \[job-id\] \[--json\]/);
+    assert.match(result.stdout, /\bcancel \[job-id\] \[--json\]/);
+    assert.match(result.stdout, /\btransfer \[--source <claude-jsonl>\] \[--json\]/);
+    assert.match(result.stdout, /\btask-resume-candidate \[--json\]/);
+    assert.match(result.stdout, /\btask-worker --job-id <id>/);
+  }
 });
 
 test("rescue command absorbs continue semantics", () => {

@@ -20,6 +20,7 @@
  *   rejectCompletion: (error: unknown) => void,
  *   finalTurn: Turn | null,
  *   completed: boolean,
+ *   inferredCompletion: boolean,
  *   finalAnswerSeen: boolean,
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
@@ -40,8 +41,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, BROKER_OWNERSHIP_RPC_CODE, BROKER_STREAM_COMPLETED_METHOD, CodexAppServerClient } from "./app-server.mjs";
+import { loadReusableBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -321,6 +322,7 @@ function createTurnCaptureState(threadId, options = {}) {
     rejectCompletion,
     finalTurn: null,
     completed: false,
+    inferredCompletion: false,
     finalAnswerSeen: false,
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
@@ -364,6 +366,7 @@ function completeTurn(state, turn = null, options = {}) {
   }
 
   if (options.inferred) {
+    state.inferredCompletion = true;
     emitProgress(state.onProgress, "Turn completion inferred after the main thread finished and subagent work drained.", "finalizing");
   }
 
@@ -478,13 +481,20 @@ function recordItem(state, item, lifecycle, threadId = null) {
   }
 
   if (item.type === "fileChange" && lifecycle === "completed") {
-    state.fileChanges.push(item);
+    state.fileChanges.push(stampItemCompletion(item));
     return;
   }
 
   if (item.type === "commandExecution" && lifecycle === "completed") {
-    state.commandExecutions.push(item);
+    state.commandExecutions.push(stampItemCompletion(item));
   }
+}
+
+function stampItemCompletion(item) {
+  if (item && typeof item === "object" && typeof item.completedAt === "string" && item.completedAt) {
+    return item;
+  }
+  return { ...item, completedAt: new Date().toISOString() };
 }
 
 function applyTurnNotification(state, message) {
@@ -603,17 +613,45 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       completeTurn(state, response.turn);
     }
 
-    return await state.completion;
+    const completedState = await state.completion;
+    if (completedState.inferredCompletion && client.transport === "broker") {
+      client.notify(BROKER_STREAM_COMPLETED_METHOD, {
+        threadId: completedState.threadId,
+        turnId: completedState.turnId
+      });
+    }
+    return completedState;
   } finally {
     clearCompletionTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
   }
 }
 
-async function withAppServer(cwd, fn) {
+function transportFallbackReasonForError(error) {
+  if (error?.rpcCode === BROKER_BUSY_RPC_CODE) {
+    return "broker busy";
+  }
+  if (error?.rpcCode === BROKER_OWNERSHIP_RPC_CODE) {
+    return "broker ownership conflict";
+  }
+  return "broker endpoint unreachable";
+}
+
+function announceTransportFallback(client, onDegraded) {
+  const reason = client?.transportFallback;
+  if (!reason) {
+    return;
+  }
+  const message = `Warning: shared Codex runtime unavailable (${reason}); using a private Codex process.`;
+  process.stderr.write(`${message}\n`);
+  onDegraded?.(reason, message);
+}
+
+async function withAppServer(cwd, fn, options = {}) {
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd);
+    announceTransportFallback(client, options.onDegraded);
     const result = await fn(client);
     await client.close();
     return result;
@@ -621,6 +659,7 @@ async function withAppServer(cwd, fn) {
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      (client?.transport === "broker" && error?.rpcCode === BROKER_OWNERSHIP_RPC_CODE) ||
       (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
 
     if (client) {
@@ -633,6 +672,8 @@ async function withAppServer(cwd, fn) {
     }
 
     const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+    directClient.transportFallback = transportFallbackReasonForError(error);
+    announceTransportFallback(directClient, options.onDegraded);
     try {
       return await fn(directClient);
     } finally {
@@ -904,7 +945,7 @@ export function getCodexAvailability(cwd) {
 }
 
 export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
-  const endpoint = env?.[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint ?? null;
+  const endpoint = env?.[BROKER_ENDPOINT_ENV] ?? loadReusableBrokerSession(cwd, env)?.endpoint ?? null;
   if (endpoint) {
     return {
       mode: "shared",
@@ -1050,8 +1091,14 @@ export async function runAppServerReview(cwd, options = {}) {
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
       error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr)
+      stderr: cleanCodexStderr(client.stderr),
+      transport: client.transport,
+      transportReason: client.transportFallback ?? null
     };
+  }, {
+    onDegraded: (_reason, message) => {
+      options.onProgress?.({ message, phase: null, stderrMessage: "" });
+    }
   });
 }
 
@@ -1154,8 +1201,14 @@ export async function runAppServerTurn(cwd, options = {}) {
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
+      commandExecutions: turnState.commandExecutions,
+      transport: client.transport,
+      transportReason: client.transportFallback ?? null
     };
+  }, {
+    onDegraded: (_reason, message) => {
+      options.onProgress?.({ message, phase: null, stderrMessage: "" });
+    }
   });
 }
 

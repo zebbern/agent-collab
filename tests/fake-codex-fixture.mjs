@@ -15,7 +15,10 @@ const readline = require("node:readline");
 
 	const STATE_PATH = ${JSON.stringify(statePath)};
 	const BEHAVIOR = ${JSON.stringify(behavior)};
+	const DETACHED_FIXTURE_TTL_MS = 5 * 60 * 1000;
+	const SELF_EXPIRING_KEEPALIVE = "setTimeout(() => process.exit(0), " + DETACHED_FIXTURE_TTL_MS + "); setInterval(() => {}, 1000)";
 	const interruptibleTurns = new Map();
+	const { spawn } = require("node:child_process");
 
 	function loadState() {
 	  if (!fs.existsSync(STATE_PATH)) {
@@ -61,7 +64,11 @@ function buildThread(thread) {
 }
 
 function buildTurn(id, status = "inProgress", error = null) {
-  return { id, status, items: [], error };
+  const turn = { id, status, items: [], error };
+  if (BEHAVIOR === "task-with-telemetry" && status === "completed") {
+    turn.tokenUsage = { totalTokens: 4321, inputTokens: 4000, outputTokens: 321 };
+  }
+  return turn;
 }
 
 function buildAccountReadResult() {
@@ -272,6 +279,22 @@ if (args[0] !== "app-server") {
 }
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+if (BEHAVIOR === "with-helper-child" || BEHAVIOR === "slow-task-with-helper-child" || BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "with-resistant-helper" || BEHAVIOR === "crash-with-post-snapshot-helper") {
+  if (BEHAVIOR !== "crash-with-post-snapshot-helper") {
+    const helperCode = BEHAVIOR === "with-resistant-helper"
+      ? "process.on('SIGTERM', () => {}); " + SELF_EXPIRING_KEEPALIVE
+      : SELF_EXPIRING_KEEPALIVE;
+    const helper = spawn(process.execPath, ["-e", helperCode], {
+      detached: process.platform !== "win32",
+      stdio: "ignore"
+    });
+    helper.unref();
+    bootState.helperPids = [...(bootState.helperPids || []), helper.pid];
+  }
+}
+if (BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "crash-with-post-snapshot-helper" || BEHAVIOR === "crash-with-post-activation-regrouped-helper" || BEHAVIOR === "post-activation-helper-on-thread-list" || BEHAVIOR === "streaming-helper-after-response") {
+  bootState.appServerPids = [...(bootState.appServerPids || []), process.pid];
+}
 saveState(bootState);
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -287,8 +310,37 @@ rl.on("line", (line) => {
     switch (message.method) {
       case "initialize":
         state.capabilities = message.params.capabilities || null;
+        if (BEHAVIOR === "crash-with-post-activation-regrouped-helper") {
+          const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
+            detached: process.platform !== "win32",
+            stdio: "ignore"
+          });
+          helper.unref();
+          state.helperPids = [...(state.helperPids || []), helper.pid];
+        }
         saveState(state);
         send({ id: message.id, result: { userAgent: "fake-codex-app-server" } });
+        if (BEHAVIOR === "crash-with-regrouped-helper") {
+          setTimeout(() => process.exit(1), 100);
+        }
+        if (BEHAVIOR === "crash-with-post-snapshot-helper") {
+          setTimeout(() => {
+            const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
+              detached: false,
+              stdio: "ignore"
+            });
+            helper.unref();
+            const current = loadState();
+            current.helperPids = [...(current.helperPids || []), helper.pid];
+            saveState(current);
+            setTimeout(() => process.exit(1), 100);
+          }, 250);
+        }
+        if (BEHAVIOR === "crash-with-post-activation-regrouped-helper") {
+          // Leave enough time for the broker to persist the post-response
+          // ownership observation before simulating the later crash.
+          setTimeout(() => process.exit(1), 500);
+        }
         break;
 
       case "initialized":
@@ -328,6 +380,15 @@ rl.on("line", (line) => {
       }
 
       case "thread/list": {
+        if (BEHAVIOR === "post-activation-helper-on-thread-list" && !state.helperPids?.length) {
+          const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
+            detached: process.platform !== "win32",
+            stdio: "ignore"
+          });
+          helper.unref();
+          state.helperPids = [helper.pid];
+          saveState(state);
+        }
         let threads = state.threads.slice();
         if (message.params.cwd) {
           threads = threads.filter((thread) => thread.cwd === message.params.cwd);
@@ -454,6 +515,22 @@ rl.on("line", (line) => {
 	        saveState(state);
 	        send({ id: message.id, result: { turn: buildTurn(turnId) } });
 
+        if (BEHAVIOR === "streaming-helper-after-response") {
+          setTimeout(() => {
+            const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
+              detached: process.platform !== "win32",
+              stdio: "ignore"
+            });
+            helper.unref();
+            const current = loadState();
+            current.helperPids = [...(current.helperPids || []), helper.pid];
+            saveState(current);
+            send({ method: "item/started", params: { threadId: thread.id, turnId, item: { type: "commandExecution", id: "late-helper" } } });
+            setTimeout(() => process.exit(1), 750);
+          }, 100);
+          break;
+        }
+
         const payload = message.params.outputSchema && message.params.outputSchema.properties && message.params.outputSchema.properties.verdict
           ? structuredReviewPayload(prompt)
           : taskPayload(prompt, thread.name && thread.name.startsWith("Codex Companion Task") && prompt.includes("Continue from the current thread state"));
@@ -568,6 +645,26 @@ rl.on("line", (line) => {
         }
 
         const items = [
+          ...(BEHAVIOR === "task-with-telemetry"
+            ? [
+                {
+                  started: { type: "commandExecution", id: "cmd_" + turnId + "_1", command: "npm test", status: "inProgress" },
+                  completed: { type: "commandExecution", id: "cmd_" + turnId + "_1", command: "npm test", status: "completed", exitCode: 0, aggregatedOutput: "ok" }
+                },
+                {
+                  completed: { type: "fileChange", id: "fc_" + turnId, status: "completed", changes: [{ path: "src/app.js", kind: "update" }] }
+                },
+                {
+                  completed: { type: "commandExecution", id: "cmd_" + turnId + "_2", command: "npm test", status: "completed", exitCode: 0, aggregatedOutput: "ok" }
+                },
+                {
+                  completed: { type: "commandExecution", id: "cmd_" + turnId + "_3", command: "npm test", status: "completed", exitCode: 1, aggregatedOutput: "failing" }
+                },
+                {
+                  completed: { type: "commandExecution", id: "cmd_" + turnId + "_4", command: "git status", status: "completed", exitCode: 0, aggregatedOutput: "clean" }
+                }
+            ]
+            : []),
           ...(BEHAVIOR === "with-reasoning"
             ? [
                 {
@@ -600,7 +697,7 @@ rl.on("line", (line) => {
 	            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	          }, 5000);
 	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
-	        } else if (BEHAVIOR === "slow-task") {
+	        } else if (BEHAVIOR === "slow-task" || BEHAVIOR === "slow-task-with-helper-child") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
@@ -653,6 +750,7 @@ export function buildEnv(binDir) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
+    CODEX_COMPANION_TEST_BROKER_TTL_MS: "30000",
     PATH: `${binDir}${sep}${process.env.PATH}`
   };
 }

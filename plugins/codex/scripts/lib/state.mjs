@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -73,8 +73,50 @@ export function loadState(cwd) {
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
     };
   } catch {
-    return defaultState();
+    quarantineCorruptStateFile(stateFile);
+    const rebuiltJobs = rebuildJobsFromJobFiles(cwd);
+    process.stderr.write(
+      `Warning: ${stateFile} is corrupt and was quarantined; rebuilt ${rebuiltJobs.length} job(s) from jobs/*.json.\n`
+    );
+    return {
+      ...defaultState(),
+      jobs: rebuiltJobs
+    };
   }
+}
+
+function quarantineCorruptStateFile(stateFile) {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.renameSync(stateFile, `${stateFile}.corrupt-${timestamp}`);
+  } catch {
+    // Best-effort quarantine: recovery must never throw.
+  }
+}
+
+function rebuildJobsFromJobFiles(cwd) {
+  let entries;
+  try {
+    entries = fs.readdirSync(resolveJobsDir(cwd));
+  } catch {
+    return [];
+  }
+
+  const jobs = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) {
+      continue;
+    }
+    try {
+      const job = JSON.parse(fs.readFileSync(path.join(resolveJobsDir(cwd), entry), "utf8"));
+      if (job && typeof job === "object" && typeof job.id === "string") {
+        jobs.push(job);
+      }
+    } catch {
+      // Skip unreadable job files.
+    }
+  }
+  return pruneJobs(jobs);
 }
 
 function pruneJobs(jobs) {
@@ -86,6 +128,22 @@ function pruneJobs(jobs) {
 function removeFileIfExists(filePath) {
   if (filePath && fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
+  }
+}
+
+function writeJsonFileAtomic(filePath, payload) {
+  const temporaryFile = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryFile, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600
+    });
+    fs.renameSync(temporaryFile, filePath);
+  } finally {
+    if (fs.existsSync(temporaryFile)) {
+      fs.unlinkSync(temporaryFile);
+    }
   }
 }
 
@@ -107,11 +165,11 @@ export function saveState(cwd, state) {
     if (retainedIds.has(job.id)) {
       continue;
     }
-    removeJobFile(resolveJobFile(cwd, job.id));
+    removeJobFile(cwd, job.id, { preserveCancelFlag: hasCancelFlag(cwd, job.id) });
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeJsonFileAtomic(resolveStateFile(cwd), nextState);
   return nextState;
 }
 
@@ -166,7 +224,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeJsonFileAtomic(jobFile, payload);
   return jobFile;
 }
 
@@ -174,9 +232,30 @@ export function readJobFile(jobFile) {
   return JSON.parse(fs.readFileSync(jobFile, "utf8"));
 }
 
-function removeJobFile(jobFile) {
-  if (fs.existsSync(jobFile)) {
-    fs.unlinkSync(jobFile);
+export function writeCancelFlag(cwd, jobId) {
+  const cancelFlag = resolveCancelFlag(cwd, jobId);
+  try {
+    fs.writeFileSync(cancelFlag, "", { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw error;
+    }
+  }
+  return cancelFlag;
+}
+
+export function hasCancelFlag(cwd, jobId) {
+  return fs.existsSync(resolveCancelFlag(cwd, jobId));
+}
+
+export function removeCancelFlag(cwd, jobId) {
+  removeFileIfExists(resolveCancelFlag(cwd, jobId));
+}
+
+function removeJobFile(cwd, jobId, options = {}) {
+  removeFileIfExists(resolveJobFile(cwd, jobId));
+  if (options.preserveCancelFlag !== true) {
+    removeCancelFlag(cwd, jobId);
   }
 }
 
@@ -188,4 +267,8 @@ export function resolveJobLogFile(cwd, jobId) {
 export function resolveJobFile(cwd, jobId) {
   ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.json`);
+}
+
+function resolveCancelFlag(cwd, jobId) {
+  return resolveJobFile(cwd, jobId).replace(/\.json$/, ".cancelled");
 }
