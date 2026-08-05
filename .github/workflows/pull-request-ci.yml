@@ -1,16 +1,25 @@
-name: Pull Request CI
+name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   ci:
-    name: CI
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The suite spawns real processes and takes ~30 minutes on Windows
+    # (tests/runtime.test.mjs alone is ~15), so the budget is generous.
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Check out repository
@@ -21,6 +30,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      # npm scripts default to cmd.exe on Windows, which breaks the POSIX
+      # bits in this repo's scripts (mkdir -p in prebuild, glob quoting).
+      - name: Use bash for npm scripts on Windows
+        if: runner.os == 'Windows'
+        run: npm config set script-shell "C:\Program Files\Git\bin\bash.exe"
 
       - name: Install dependencies
         run: npm ci
