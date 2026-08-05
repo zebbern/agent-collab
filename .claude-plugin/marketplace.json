@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Community fork of the OpenAI Codex plugin for Claude Code, with durability, Windows process-cleanup, and job-progress improvements.",
-    "version": "1.0.6+fork.1"
+    "version": "1.0.6+fork.2"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6+fork.1",
+      "version": "1.0.6+fork.2",
       "author": {
         "name": "zebbern"
       },

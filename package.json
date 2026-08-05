@@ -1,6 +1,6 @@
 {
   "name": "codex-collaborate-plugin",
-  "version": "1.0.6+fork.1",
+  "version": "1.0.6+fork.2",
   "private": true,
   "type": "module",
   "description": "Community fork of the OpenAI Codex plugin for Claude Code.",
