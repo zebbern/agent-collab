@@ -52,12 +52,64 @@ const DEFAULT_CONTINUE_PROMPT =
 const EXTERNAL_AGENT_IMPORT_COMPLETED = "externalAgentConfig/import/completed";
 const EXTERNAL_AGENT_IMPORT_TIMEOUT_MS = 2 * 60 * 1000;
 
+const MAX_CLEAN_STDERR_BYTES = 32 * 1024;
+const STDERR_ANSI_PATTERN = /\u001b\[[0-9;?]*[A-Za-z]/g;
+const STDERR_TIMESTAMP_PATTERN = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?/g;
+const STDERR_PATH_PATTERN = /(?:[A-Za-z]:)?(?:[\\/][^\s:\\/]+){2,}[\\/]?/g;
+
+function stderrLineSignature(line) {
+  return line
+    .replace(STDERR_ANSI_PATTERN, "")
+    .replace(STDERR_TIMESTAMP_PATTERN, "<timestamp>")
+    .replace(STDERR_PATH_PATTERN, "<path>")
+    .trim();
+}
+
+function collapseRepeatedStderrLines(lines) {
+  const collapsed = [];
+  let index = 0;
+  while (index < lines.length) {
+    const signature = stderrLineSignature(lines[index]);
+    let runLength = 1;
+    while (index + runLength < lines.length && stderrLineSignature(lines[index + runLength]) === signature) {
+      runLength += 1;
+    }
+    collapsed.push(lines[index]);
+    if (runLength > 1) {
+      const suppressed = runLength - 1;
+      collapsed.push(`... (${suppressed} similar ${suppressed === 1 ? "line" : "lines"} suppressed)`);
+    }
+    index += runLength;
+  }
+  return collapsed;
+}
+
+function truncateStderrMiddle(text, maxBytes = MAX_CLEAN_STDERR_BYTES) {
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= maxBytes) {
+    return text;
+  }
+  const budget = Math.floor(maxBytes / 2);
+  let head = text.slice(0, budget);
+  const headBreak = head.lastIndexOf("\n");
+  if (headBreak > 0) {
+    head = head.slice(0, headBreak);
+  }
+  let tail = text.slice(-budget);
+  const tailBreak = tail.indexOf("\n");
+  if (tailBreak >= 0 && tailBreak < tail.length - 1) {
+    tail = tail.slice(tailBreak + 1);
+  }
+  const omittedBytes = totalBytes - Buffer.byteLength(head, "utf8") - Buffer.byteLength(tail, "utf8");
+  return `${head}\n... (${omittedBytes} bytes omitted) ...\n${tail}`;
+}
+
 function cleanCodexStderr(stderr) {
-  return stderr
+  const lines = stderr
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
-    .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"))
-    .join("\n");
+    .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"));
+  return truncateStderrMiddle(collapseRepeatedStderrLines(lines).join("\n"));
 }
 
 /** @returns {ThreadStartParams} */
@@ -1271,4 +1323,4 @@ export function readOutputSchema(schemaPath) {
   return readJsonFile(schemaPath);
 }
 
-export { DEFAULT_CONTINUE_PROMPT, TASK_THREAD_PREFIX };
+export { cleanCodexStderr, DEFAULT_CONTINUE_PROMPT, TASK_THREAD_PREFIX };
