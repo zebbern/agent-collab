@@ -55,13 +55,57 @@ function divergenceDigest(module) {
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 
-test("every shared chassis module exists in both plugins", () => {
-  for (const module of PINNED_DIVERGENCE.keys()) {
-    for (const plugin of ["codex", "cursor"]) {
-      const filePath = path.join(ROOT, "plugins", plugin, "scripts", "lib", module);
-      assert.equal(fs.existsSync(filePath), true, `${plugin} is missing lib/${module}`);
+// Provider-specific modules that intentionally exist in only one plugin.
+// Anything else found in a lib directory must exist in BOTH plugins and be
+// pinned above — otherwise a new chassis module (or a one-sided addition)
+// would silently escape the drift guard.
+const PROVIDER_ONLY = {
+  codex: new Set([
+    "app-server-protocol.d.ts",
+    "app-server.mjs",
+    "broker-endpoint.mjs",
+    "broker-lifecycle.mjs",
+    "broker-ownership.mjs",
+    "claude-session-transfer.mjs",
+    "codex.mjs"
+  ]),
+  cursor: new Set(["cursor.mjs"])
+};
+
+test("every lib module is either provider-only or a pinned chassis pair", () => {
+  const problems = [];
+  const seen = { codex: new Set(), cursor: new Set() };
+  for (const plugin of ["codex", "cursor"]) {
+    for (const entry of fs.readdirSync(path.join(ROOT, "plugins", plugin, "scripts", "lib"))) {
+      seen[plugin].add(entry);
     }
   }
+  for (const plugin of ["codex", "cursor"]) {
+    const other = plugin === "codex" ? "cursor" : "codex";
+    for (const entry of seen[plugin]) {
+      if (PROVIDER_ONLY[plugin].has(entry)) {
+        if (seen[other].has(entry)) {
+          problems.push(`lib/${entry} is marked provider-only for ${plugin} but also exists in ${other}`);
+        }
+        continue;
+      }
+      if (!seen[other].has(entry)) {
+        problems.push(`lib/${entry} exists only in plugins/${plugin} — add it to the other plugin, or to PROVIDER_ONLY if intentional`);
+        continue;
+      }
+      if (!PINNED_DIVERGENCE.has(entry)) {
+        problems.push(`lib/${entry} is shared but has no pin — add it to PINNED_DIVERGENCE`);
+      }
+    }
+  }
+  for (const module of PINNED_DIVERGENCE.keys()) {
+    for (const plugin of ["codex", "cursor"]) {
+      if (!seen[plugin].has(module)) {
+        problems.push(`pinned lib/${module} is missing from plugins/${plugin}`);
+      }
+    }
+  }
+  assert.deepEqual(problems, []);
 });
 
 test("chassis copies have not drifted beyond their pinned divergence", () => {

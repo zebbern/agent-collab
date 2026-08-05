@@ -29,24 +29,38 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          FORK_POINT: db52e28f4d9ded852ab3942cea316258ae4ef346 # upstream v1.0.6
         run: |
           set -euo pipefail
+          # The current upstream base lives in a committed pin so a rebase
+          # updates it in the same commit and the drift count stays honest.
+          FORK_POINT=$(tr -d '[:space:]' < .github/upstream-base)
           git remote add upstream https://github.com/openai/codex-plugin-cc.git
           git fetch --quiet upstream main
 
           HEAD_SHA=$(git rev-parse upstream/main)
           COUNT=$(git rev-list --count "$FORK_POINT..upstream/main")
-          echo "Upstream is $COUNT commit(s) past the fork point (HEAD $HEAD_SHA)."
+          echo "Upstream is $COUNT commit(s) past the pinned base (HEAD $HEAD_SHA)."
+
           if [ "$COUNT" -eq 0 ]; then
+            # Drift resolved (or never existed): close any stale tracking issue.
+            OPEN=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
+            if [ -n "$OPEN" ]; then
+              gh issue close "$OPEN" --comment "Upstream is no longer ahead of the pinned base ($(tr -d '[:space:]' < .github/upstream-base | cut -c1-7)); closing."
+            fi
             exit 0
           fi
+
+          # The tracking label is bootstrapped here so the workflow carries its
+          # own setup instead of depending on manual repo configuration.
+          gh label create upstream-sync --description "Upstream codex-plugin-cc has moved past the fork point" --color 1D76DB --force
 
           SHORT=${HEAD_SHA:0:7}
           TITLE="Upstream codex-plugin-cc: $COUNT commits past the fork point (through $SHORT)"
 
           {
-            echo "Upstream [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) has moved **$COUNT commit(s)** past this fork's base (\`${FORK_POINT:0:7}\`, v1.0.6)."
+            echo "Upstream [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) has moved **$COUNT commit(s)** past this fork's pinned base (\`${FORK_POINT:0:7}\`)."
+            echo
+            echo "After rebasing, update \`.github/upstream-base\` to the new base SHA in the same commit — the next run will then close this issue automatically."
             echo
             echo "### Latest upstream commits"
             echo '```'
