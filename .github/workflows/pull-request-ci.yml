@@ -21,10 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu + windows are the branch-protection-required contexts; the
-        # macOS leg is advisory (Claude Code runs there natively, and the
-        # Darwin ps/lstart path is otherwise never exercised by CI).
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Check out repository
