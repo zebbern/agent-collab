@@ -1,6 +1,6 @@
 {
   "name": "cursor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Use Cursor from Claude Code to review code or delegate tasks. Community plugin by zebbern.",
   "author": {
     "name": "zebbern"

@@ -23,6 +23,9 @@
  * }} CursorInvocation
  */
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 
 import { readJsonFile } from "./fs.mjs";
@@ -213,6 +216,56 @@ function buildPathSpawnPlan(cwd) {
     return buildNativeSpawnPlan(shim);
   }
   return { kind: "direct", file: "cursor-agent", prefix: [] };
+}
+
+// Wraps a WSL invocation so the Linux-side agent PID lands in a pidfile the
+// Windows side can read: bash writes $$ then execs the agent, so the recorded
+// PID *is* the agent's. $0 is "bash", $1 the pidfile, $2 the binary.
+const WSL_PIDFILE_WRAPPER = 'echo $$ > "$1"; BIN="$2"; shift 2; exec "$BIN" "$@"';
+
+export function buildWslAgentSpawn(plan, args, pidFileWslPath) {
+  return {
+    file: plan.file,
+    args: ["-e", "/bin/bash", "-c", WSL_PIDFILE_WRAPPER, "bash", pidFileWslPath, plan.prefix[1], ...args],
+    options: {}
+  };
+}
+
+export async function reapWslAgent(pid, options = {}) {
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  const delayMs = options.delayMs ?? 300;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const readCmdline = () =>
+    runCommandImpl(
+      "wsl",
+      ["-e", "/bin/sh", "-c", `tr "\\0" " " < /proc/${Math.trunc(pid)}/cmdline 2>/dev/null`],
+      { shell: false }
+    );
+
+  if (!Number.isFinite(pid)) {
+    return { reaped: true, alreadyDead: true };
+  }
+
+  const initial = readCmdline();
+  const initialCmdline = initial.error || initial.status !== 0 ? "" : initial.stdout.trim();
+  if (!initialCmdline) {
+    return { reaped: true, alreadyDead: true };
+  }
+  if (!initialCmdline.includes("cursor-agent")) {
+    // The distro reused this PID for something else: our agent is gone and
+    // whatever runs there now must not be touched.
+    return { reaped: true, pidReused: true };
+  }
+
+  for (const signal of ["TERM", "KILL"]) {
+    runCommandImpl("wsl", ["-e", "/bin/sh", "-c", `kill -${signal} ${Math.trunc(pid)} 2>/dev/null`], { shell: false });
+    await wait(delayMs);
+    const check = readCmdline();
+    if (check.error || check.status !== 0 || !check.stdout.trim()) {
+      return { reaped: true, signal };
+    }
+  }
+  return { reaped: false, survivors: [Math.trunc(pid)] };
 }
 
 function planCommandLine(plan, args) {
@@ -657,7 +710,17 @@ export async function runCursorTurn(cwd, options = {}) {
     agentArgs.push("--force");
   }
 
-  const line = planCommandLine(invocation.plan, agentArgs);
+  // For the WSL transport, route the spawn through the pidfile wrapper so the
+  // Linux-side agent PID is known to the Windows side — cancel needs it to
+  // reap the agent inside the distro (killing wsl.exe alone proves nothing).
+  let wslPidFile = null;
+  let line;
+  if (invocation.transport === "wsl") {
+    wslPidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cursor-wsl-")), "agent.pid");
+    line = buildWslAgentSpawn(invocation.plan, agentArgs, winPathToWsl(wslPidFile));
+  } else {
+    line = planCommandLine(invocation.plan, agentArgs);
+  }
   emitProgress(
     options.onProgress,
     `Starting Cursor turn${invocation.transport === "wsl" ? " via WSL" : ""}.`,
@@ -687,6 +750,30 @@ export async function runCursorTurn(cwd, options = {}) {
     };
     let stdoutBuffer = "";
     let settled = false;
+
+    if (wslPidFile) {
+      // The wrapper writes the pidfile before exec'ing the agent; poll briefly
+      // and hand the Linux-side PID to the caller for persistence.
+      const pidDeadline = Date.now() + 5000;
+      const pollPidFile = () => {
+        if (settled) {
+          return;
+        }
+        try {
+          const raw = fs.readFileSync(wslPidFile, "utf8").trim();
+          if (/^\d+$/.test(raw)) {
+            options.onWslAgentPid?.(Number(raw));
+            return;
+          }
+        } catch {
+          // Not written yet.
+        }
+        if (Date.now() < pidDeadline) {
+          setTimeout(pollPidFile, 50).unref?.();
+        }
+      };
+      pollPidFile();
+    }
 
     child.stdin.end();
     child.stdout.setEncoding("utf8");

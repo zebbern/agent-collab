@@ -13,3 +13,18 @@ Initial release.
 
 This plugin is derived from the codex plugin chassis in this repository, itself a
 fork of the OpenAI Codex plugin for Claude Code (Apache-2.0). See NOTICE.
+
+## 0.2.0
+
+- Cancel now proves ownership before killing anything. Workers persist a
+  process identity at start (Unix start-time identity, or `(pid, CreationDate)`
+  via CIM on Windows) plus a POSIX ownership snapshot, and the Windows kill
+  path verifies the identity before `taskkill` — a stale or reused PID is never
+  killed, and a job with no recorded proof fails closed as `cleanup-pending`
+  instead of being blindly terminated.
+- WSL jobs record the Linux-side `cursor-agent` PID (a bash exec wrapper writes
+  it to a pidfile the Windows side can read) and cancel reaps the agent inside
+  the distro first — verifying `/proc` cmdline before signalling, escalating
+  TERM→KILL, and failing closed if the agent survives. The Windows relay tree
+  is then collapsed and the worker's exit is verified by identity poll, since
+  `taskkill` cannot terminate `wsl.exe` relay processes directly.

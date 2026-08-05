@@ -14,11 +14,19 @@ import {
   getCursorAvailability,
   parseStructuredOutput,
   readOutputSchema,
+  reapWslAgent,
   runCursorTurn
 } from "./lib/cursor.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, getProcessIdentity, terminateProcessTree } from "./lib/process.mjs";
+import {
+  binaryAvailable,
+  captureProcessOwnership,
+  getProcessIdentity,
+  getWindowsProcessIdentity,
+  isWindowsProcessIdentity,
+  terminateProcessTree
+} from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { generateJobId, upsertJob, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
 import {
@@ -350,7 +358,8 @@ async function executeTaskRun(request) {
     model: request.model,
     resumeChatId: request.resumeChatId,
     write: request.write,
-    onProgress: request.onProgress
+    onProgress: request.onProgress,
+    onWslAgentPid: request.onWslAgentPid
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -696,10 +705,25 @@ export async function handleTaskWorker(argv, dependencies = {}) {
   } = storedJob;
   let workerOwnership;
   try {
-    const processIdentity = (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid);
+    // Unix start-time identity where available; on win32 fall back to the
+    // (pid, CreationDate) identity so cancel can prove the PID still belongs
+    // to this worker before any taskkill.
+    const processIdentity =
+      (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid) ??
+      (process.platform === "win32"
+        ? (dependencies.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity)(process.pid)
+        : null);
     workerOwnership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
   } catch {
     workerOwnership = { ownershipCaptureFailed: true };
+  }
+  try {
+    const ownershipSnapshot = (dependencies.captureProcessOwnershipImpl ?? captureProcessOwnership)(process.pid);
+    if (ownershipSnapshot) {
+      workerOwnership = { ...workerOwnership, ownershipSnapshot };
+    }
+  } catch {
+    // Snapshot capture is best-effort; identity above still gates cancel.
   }
 
   const request = storedJob.request;
@@ -726,7 +750,18 @@ export async function handleTaskWorker(argv, dependencies = {}) {
     () =>
       executeTaskRun({
         ...request,
-        onProgress: progress
+        onProgress: progress,
+        onWslAgentPid: (wslAgentPid) => {
+          // Persist the Linux-side agent PID as soon as it is known so a
+          // concurrent cancel can reap the agent inside the distro.
+          try {
+            const current = readStoredJob(workspaceRoot, options["job-id"]) ?? {};
+            writeJobFile(workspaceRoot, options["job-id"], { ...current, wslAgentPid, transport: "wsl" });
+            upsertJob(workspaceRoot, { id: options["job-id"], wslAgentPid });
+          } catch {
+            // Best-effort persistence; the job continues either way.
+          }
+        }
       }),
     { logFile }
   );
@@ -836,12 +871,69 @@ export async function handleCancel(argv, dependencies = {}) {
 
   const expectedRootIdentity = existing.processIdentity ?? null;
   const ownershipCaptureFailed = existing.ownershipCaptureFailed === true;
-  const cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
-    expectedRootIdentity,
-    ownershipSnapshot: null,
-    requireVerifiedOwnership: ownershipCaptureFailed,
-    priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
-  });
+  writeCancelFlag(workspaceRoot, job.id);
+
+  // WSL transport: reap the Linux-side agent FIRST. taskkill cannot terminate
+  // wsl.exe relay processes ("operation is not supported"), but once the agent
+  // dies inside the distro the relay tree collapses on its own — and killing
+  // the Windows side alone would prove nothing about the agent anyway.
+  let wslReap = null;
+  if (Number.isFinite(record.wslAgentPid)) {
+    wslReap = await (dependencies.reapWslAgentImpl ?? reapWslAgent)(record.wslAgentPid);
+    if (wslReap?.reaped !== true) {
+      const survivors = wslReap?.survivors ?? [record.wslAgentPid];
+      const failureMessage = `The WSL cursor-agent for ${job.id} (pid ${survivors.join(", ")}) survived TERM and KILL; not marking cancelled.`;
+      appendLogLine(record.logFile, failureMessage);
+      writeJobFile(workspaceRoot, job.id, {
+        ...record,
+        phase: "cleanup-pending",
+        wslReap,
+        cleanupFailure: failureMessage
+      });
+      upsertJob(workspaceRoot, {
+        id: job.id,
+        status: record.status,
+        phase: "cleanup-pending",
+        pid: record.pid,
+        cleanupFailure: failureMessage
+      });
+      throw new Error(failureMessage);
+    }
+  }
+
+  let cleanupOutcome = null;
+  try {
+    cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
+      expectedRootIdentity,
+      ownershipSnapshot: existing.ownershipSnapshot ?? null,
+      requireVerifiedOwnership: ownershipCaptureFailed,
+      priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
+    });
+  } catch (error) {
+    // A resistant tree (e.g. a not-yet-collapsed wsl.exe relay) is not fatal:
+    // the identity poll below decides whether the worker actually exited.
+    appendLogLine(record.logFile, `Process tree termination for ${job.id} reported: ${error.message}`);
+  }
+
+  if (cleanupOutcome?.verified !== true && isWindowsProcessIdentity(expectedRootIdentity)) {
+    // The worker exits by itself once its agent is gone and the cancel flag is
+    // set; give it a short window and verify by identity, not by liveness of
+    // whatever may have reused the PID.
+    const identityImpl = dependencies.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity;
+    const deadline = Date.now() + (dependencies.workerExitWaitMs ?? 5000);
+    for (;;) {
+      const currentIdentity = identityImpl(record.pid);
+      if (currentIdentity === null || currentIdentity !== expectedRootIdentity) {
+        cleanupOutcome = { ...(cleanupOutcome ?? {}), attempted: true, delivered: true, verified: true, method: "identity-poll" };
+        break;
+      }
+      if (Date.now() > deadline) {
+        break;
+      }
+      await sleep(250);
+    }
+  }
+
   if (cleanupOutcome?.verified !== true) {
     const failureMessage =
       ownershipCaptureFailed && !expectedRootIdentity

@@ -12,9 +12,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { spawn } from "node:child_process";
+
 import { buildCursorEnv, installFakeCursorAgent } from "./fake-cursor-agent-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
-import { resolveStateDir } from "../plugins/cursor/scripts/lib/state.mjs";
+import { resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs");
@@ -431,6 +433,50 @@ test("task --background enqueues a detached worker and result returns its output
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
   assert.equal(resultPayload.storedJob.result.transport, "native");
+});
+
+test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "slow");
+
+  // A live process the plugin does NOT own, standing in for a reused PID.
+  const bystander = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+    stdio: "ignore"
+  });
+  t.after(() => {
+    try {
+      bystander.kill();
+    } catch {
+      // Already gone.
+    }
+  });
+
+  // A legacy job record whose ownership capture failed: raw pid, no identity.
+  upsertJob(repo, { id: "task-stale", status: "running", jobClass: "task", pid: bystander.pid });
+  writeJobFile(repo, "task-stale", {
+    id: "task-stale",
+    status: "running",
+    pid: bystander.pid,
+    ownershipCaptureFailed: true,
+    request: { cwd: repo, prompt: "stale" }
+  });
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-stale", "--json"], {
+    cwd: repo,
+    env: buildCursorEnv(binDir)
+  });
+
+  // The cancel must fail closed: non-zero exit, ownership message, and the
+  // bystander process must still be alive.
+  assert.notEqual(cancelResult.status, 0);
+  assert.match(`${cancelResult.stderr}\n${cancelResult.stdout}`, /could not be verified as owned|Unable to verify cleanup/);
+  assert.doesNotThrow(() => process.kill(bystander.pid, 0));
+
+  const state = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8"));
+  const staleJob = state.jobs.find((job) => job.id === "task-stale");
+  assert.notEqual(staleJob.status, "cancelled");
+  assert.equal(staleJob.phase, "cleanup-pending");
 });
 
 test("cancel stops a slow background task and marks it cancelled", async () => {

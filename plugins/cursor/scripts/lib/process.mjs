@@ -566,6 +566,36 @@ function degradedDirectChildKill(pid, options, killImpl, reason) {
   });
 }
 
+const WINDOWS_IDENTITY_MARKER = "@win32:";
+
+export function getWindowsProcessIdentity(pid, options = {}) {
+  if (!Number.isFinite(pid)) {
+    return null;
+  }
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  // CreationDate.ToFileTimeUtc() is a stable integer for the process start
+  // time; (pid, start time) uniquely identifies a Windows process the same
+  // way (pid, lstart) does on Unix, so a reused PID never matches.
+  const result = runCommandImpl(
+    "powershell",
+    [
+      "-NoProfile",
+      "-Command",
+      `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CreationDate.ToFileTimeUtc()`
+    ],
+    { cwd: options.cwd, env: options.env, shell: false }
+  );
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  const fileTime = result.stdout.trim();
+  return /^\d+$/.test(fileTime) ? `${Math.trunc(pid)}${WINDOWS_IDENTITY_MARKER}${fileTime}` : null;
+}
+
+export function isWindowsProcessIdentity(identity) {
+  return typeof identity === "string" && identity.includes(WINDOWS_IDENTITY_MARKER);
+}
+
 export async function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     const ownershipSnapshot = options.ownershipSnapshot ?? null;
@@ -593,6 +623,31 @@ export async function terminateProcessTree(pid, options = {}) {
   const ownershipEstablished = Boolean(ownershipSnapshot || expectedRootIdentity || ownershipCaptureFailed);
 
   if (platform === "win32") {
+    // Ownership gates run BEFORE taskkill: a raw PID is never proof — the
+    // recorded process may have exited and the PID been reused by an
+    // unrelated process.
+    if (ownershipCaptureFailed && !expectedRootIdentity && !captureFailureCleanupAllowed) {
+      return normalizeProcessCleanupOutcome({
+        attempted: false,
+        delivered: false,
+        verified: false,
+        degraded: true,
+        method: null
+      });
+    }
+    if (isWindowsProcessIdentity(expectedRootIdentity)) {
+      const currentIdentity = (options.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity)(pid, options);
+      if (currentIdentity === null) {
+        // The recorded process no longer exists: nothing to kill, and the
+        // cancel is safe to finalize.
+        return normalizeProcessCleanupOutcome({ attempted: false, delivered: false, verified: true, method: "identity-check" });
+      }
+      if (currentIdentity !== expectedRootIdentity) {
+        // PID reuse: whatever runs under this PID now is not our job. Never
+        // kill it; the original process is verifiably gone.
+        return normalizeProcessCleanupOutcome({ attempted: false, delivered: false, verified: true, method: "identity-check" });
+      }
+    }
     // shell: false — under Git Bash (SHELL set), MSYS argument conversion
     // rewrites /PID into a filesystem path (e.g. "C:/Program Files/Git/PID"),
     // making taskkill fail with "Invalid argument".
