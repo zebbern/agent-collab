@@ -16,6 +16,15 @@
         "name": "zebbern"
       },
       "source": "./plugins/codex"
+    },
+    {
+      "name": "cursor",
+      "description": "Use Cursor from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
+      "author": {
+        "name": "zebbern"
+      },
+      "source": "./plugins/cursor"
     }
   ]
 }
