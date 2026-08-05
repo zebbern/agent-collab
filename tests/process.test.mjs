@@ -10,6 +10,31 @@ import {
   terminateProcessTree
 } from "../plugins/codex/scripts/lib/process.mjs";
 
+test("Unix process-table reads pin LC_ALL=C so lstart identities are locale-stable", () => {
+  // The lstart text IS the identity payload compared across invocations; a
+  // caller environment with a different LC_TIME must not leak into ps.
+  let seenEnv = null;
+  captureProcessOwnership(7300, {
+    platform: "linux",
+    env: { PATH: "/usr/bin", LC_ALL: "nb_NO.UTF-8" },
+    runCommandImpl(command, args, options) {
+      seenEnv = options.env;
+      return {
+        command,
+        args,
+        status: 0,
+        signal: null,
+        stdout: "7300 1 7300 7300 S Mon Jul 27 00:09:00 2026\n",
+        stderr: "",
+        error: null
+      };
+    }
+  });
+
+  assert.equal(seenEnv.LC_ALL, "C");
+  assert.equal(seenEnv.PATH, "/usr/bin");
+});
+
 test("captureProcessOwnership never treats a Darwin audit session as process containment", () => {
   const snapshot = captureProcessOwnership(7300, {
     platform: "darwin",

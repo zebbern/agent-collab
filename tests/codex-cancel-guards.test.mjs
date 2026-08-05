@@ -26,10 +26,14 @@ const ok = (stdout) => ({ status: 0, signal: null, stdout, stderr: "", error: nu
 const fail = () => ({ status: 1, signal: null, stdout: "", stderr: "no such process", error: null });
 
 test("getWindowsProcessIdentity builds a pid@win32 identity from CIM output", () => {
-  const { runCommandImpl } = commandRecorder([
+  const { calls, runCommandImpl } = commandRecorder([
     { match: (key) => key.startsWith("powershell"), result: ok("133702000000000000\n") }
   ]);
   assert.equal(getWindowsProcessIdentity(4242, { runCommandImpl }), "4242@win32:133702000000000000");
+  // The probe must never be able to block on console input: a hung probe
+  // burns the retry budget and turns into an "unavailable" refusal on the
+  // cancel path.
+  assert.deepEqual(calls[0].slice(0, 3), ["powershell", "-NoProfile", "-NonInteractive"]);
   assert.equal(isWindowsProcessIdentity("4242@win32:133702000000000000"), true);
   assert.equal(isWindowsProcessIdentity("4242@Mon Jul 27 00:00:00 2026"), false);
 

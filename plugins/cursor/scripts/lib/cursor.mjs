@@ -219,9 +219,13 @@ function buildPathSpawnPlan(cwd) {
 }
 
 // Wraps a WSL invocation so the Linux-side agent PID lands in a pidfile the
-// Windows side can read: bash writes $$ then execs the agent, so the recorded
-// PID *is* the agent's. $0 is "bash", $1 the pidfile, $2 the binary.
-const WSL_PIDFILE_WRAPPER = 'echo $$ > "$1"; BIN="$2"; shift 2; exec "$BIN" "$@"';
+// Windows side can read: bash writes "$$ <starttime>" then execs the agent.
+// exec preserves both the PID and the /proc starttime (field 22 of
+// /proc/$$/stat — array index 19 after stripping "pid (comm) "), so the
+// recorded pair *is* the agent's (pid, birth time) identity, the same
+// standard the win32 kill path proves via (pid, CreationDate).
+const WSL_PIDFILE_WRAPPER =
+  'S=$(</proc/$$/stat); S=${S##*) }; A=($S); echo "$$ ${A[19]}" > "$1"; BIN="$2"; shift 2; exec "$BIN" "$@"';
 
 export function buildWslAgentSpawn(plan, args, pidFileWslPath) {
   return {
@@ -231,37 +235,96 @@ export function buildWslAgentSpawn(plan, args, pidFileWslPath) {
   };
 }
 
+// The pidfile crosses the DrvFs/9P boundary, so a Windows-side read can
+// observe a partially flushed line that still parses — e.g. a truncated
+// starttime ("354 21" for "354 2201420") — which would persist a wrong
+// identity and later misread a live agent as a reused PID. A parse is only
+// accepted once two consecutive reads return byte-identical content.
+export function createWslPidFileReader() {
+  let previousRaw = null;
+  return (raw) => {
+    const trimmed = raw.trim();
+    const parsed = trimmed.match(/^(\d+)(?:\s+(\d+))?$/);
+    const stable = parsed !== null && trimmed === previousRaw;
+    previousRaw = trimmed;
+    if (!stable) {
+      return null;
+    }
+    return { pid: Number(parsed[1]), startTime: parsed[2] ?? null };
+  };
+}
+
 export async function reapWslAgent(pid, options = {}) {
   const runCommandImpl = options.runCommandImpl ?? runCommand;
   const delayMs = options.delayMs ?? 300;
+  const expectedStartTime = options.expectedStartTime != null ? String(options.expectedStartTime) : null;
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const readCmdline = () =>
-    runCommandImpl(
+  // One WSL round trip reads both identity factors: line 1 is the cmdline
+  // (NUL bytes as spaces), line 2 the /proc starttime (field 22 of stat,
+  // positional ${20} after stripping "pid (comm) "). starttime never changes
+  // across exec, so (pid, starttime) is the agent's birth identity — the
+  // same standard the win32 path proves via (pid, CreationDate). A failed
+  // wsl.exe invocation is probe failure, never evidence of death — the same
+  // rule the win32 tri-state probe enforces.
+  const readAgentState = () => {
+    const probe = runCommandImpl(
       "wsl",
-      ["-e", "/bin/sh", "-c", `tr "\\0" " " < /proc/${Math.trunc(pid)}/cmdline 2>/dev/null`],
+      [
+        "-e",
+        "/bin/sh",
+        "-c",
+        `tr "\\0" " " < /proc/${Math.trunc(pid)}/cmdline 2>/dev/null; echo; S=$(cat /proc/${Math.trunc(pid)}/stat 2>/dev/null); S=\${S##*) }; set -- $S; echo \${20}`
+      ],
       { shell: false }
     );
+    if (probe.error || probe.status !== 0) {
+      return { ok: false, cmdline: "", startTime: null };
+    }
+    const lines = probe.stdout.split("\n");
+    return { ok: true, cmdline: (lines[0] ?? "").trim(), startTime: (lines[1] ?? "").trim() || null };
+  };
+  // Confirmed-gone requires a successful probe showing the PID empty,
+  // occupied by an unrelated command, or occupied by a cursor-agent born at
+  // a different time. Probe failure never counts as gone.
+  const agentGone = (state) =>
+    state.ok &&
+    (!state.cmdline ||
+      !state.cmdline.includes("cursor-agent") ||
+      (expectedStartTime !== null && state.startTime !== null && state.startTime !== expectedStartTime));
 
   if (!Number.isFinite(pid)) {
     return { reaped: true, alreadyDead: true };
   }
 
-  const initial = readCmdline();
-  const initialCmdline = initial.error || initial.status !== 0 ? "" : initial.stdout.trim();
-  if (!initialCmdline) {
+  const initial = readAgentState();
+  if (!initial.ok) {
+    return { reaped: false, probeUnavailable: true, survivors: [Math.trunc(pid)] };
+  }
+  if (!initial.cmdline) {
     return { reaped: true, alreadyDead: true };
   }
-  if (!initialCmdline.includes("cursor-agent")) {
+  if (!initial.cmdline.includes("cursor-agent")) {
     // The distro reused this PID for something else: our agent is gone and
     // whatever runs there now must not be touched.
+    return { reaped: true, pidReused: true };
+  }
+  if (expectedStartTime !== null && initial.startTime === null) {
+    // We hold a recorded birth time but cannot read the live one; killing on
+    // the weaker cmdline evidence alone would betray the recorded identity.
+    // Fail closed — cmdline-only reaping is reserved for legacy records that
+    // never captured a starttime.
+    return { reaped: false, identityUnverified: true, survivors: [Math.trunc(pid)] };
+  }
+  if (expectedStartTime !== null && initial.startTime !== expectedStartTime) {
+    // Right-looking cmdline, wrong birth time: another cursor-agent recycled
+    // our PID. Not ours — leave it alone.
     return { reaped: true, pidReused: true };
   }
 
   for (const signal of ["TERM", "KILL"]) {
     runCommandImpl("wsl", ["-e", "/bin/sh", "-c", `kill -${signal} ${Math.trunc(pid)} 2>/dev/null`], { shell: false });
     await wait(delayMs);
-    const check = readCmdline();
-    if (check.error || check.status !== 0 || !check.stdout.trim()) {
+    if (agentGone(readAgentState())) {
       return { reaped: true, signal };
     }
   }
@@ -753,16 +816,20 @@ export async function runCursorTurn(cwd, options = {}) {
 
     if (wslPidFile) {
       // The wrapper writes the pidfile before exec'ing the agent; poll briefly
-      // and hand the Linux-side PID to the caller for persistence.
+      // and hand the Linux-side (pid, starttime) to the caller for
+      // persistence. The reader requires two consecutive identical reads
+      // before accepting, so a torn DrvFs read can never persist a truncated
+      // identity.
+      const readPidFile = createWslPidFileReader();
       const pidDeadline = Date.now() + 5000;
       const pollPidFile = () => {
         if (settled) {
           return;
         }
         try {
-          const raw = fs.readFileSync(wslPidFile, "utf8").trim();
-          if (/^\d+$/.test(raw)) {
-            options.onWslAgentPid?.(Number(raw));
+          const stable = readPidFile(fs.readFileSync(wslPidFile, "utf8"));
+          if (stable) {
+            options.onWslAgentPid?.(stable.pid, stable.startTime);
             return;
           }
         } catch {

@@ -757,13 +757,20 @@ export async function handleTaskWorker(argv, dependencies = {}) {
       executeTaskRun({
         ...request,
         onProgress: progress,
-        onWslAgentPid: (wslAgentPid) => {
-          // Persist the Linux-side agent PID as soon as it is known so a
-          // concurrent cancel can reap the agent inside the distro.
+        onWslAgentPid: (wslAgentPid, wslAgentStartTime) => {
+          // Persist the Linux-side agent (pid, starttime) as soon as it is
+          // known so a concurrent cancel can reap the agent inside the distro
+          // and prove it is signalling the process we spawned, not a reused
+          // PID.
           try {
             const current = readStoredJob(workspaceRoot, options["job-id"]) ?? {};
-            writeJobFile(workspaceRoot, options["job-id"], { ...current, wslAgentPid, transport: "wsl" });
-            upsertJob(workspaceRoot, { id: options["job-id"], wslAgentPid });
+            writeJobFile(workspaceRoot, options["job-id"], {
+              ...current,
+              wslAgentPid,
+              wslAgentStartTime: wslAgentStartTime ?? null,
+              transport: "wsl"
+            });
+            upsertJob(workspaceRoot, { id: options["job-id"], wslAgentPid, wslAgentStartTime: wslAgentStartTime ?? null });
           } catch {
             // Best-effort persistence; the job continues either way.
           }
@@ -885,10 +892,16 @@ export async function handleCancel(argv, dependencies = {}) {
   // the Windows side alone would prove nothing about the agent anyway.
   let wslReap = null;
   if (Number.isFinite(record.wslAgentPid)) {
-    wslReap = await (dependencies.reapWslAgentImpl ?? reapWslAgent)(record.wslAgentPid);
+    wslReap = await (dependencies.reapWslAgentImpl ?? reapWslAgent)(record.wslAgentPid, {
+      expectedStartTime: record.wslAgentStartTime ?? null
+    });
     if (wslReap?.reaped !== true) {
       const survivors = wslReap?.survivors ?? [record.wslAgentPid];
-      const failureMessage = `The WSL cursor-agent for ${job.id} (pid ${survivors.join(", ")}) survived TERM and KILL; not marking cancelled.`;
+      const failureMessage = wslReap?.probeUnavailable === true
+        ? `The WSL probe for ${job.id} (pid ${survivors.join(", ")}) failed, so the agent's state is unknown; not marking cancelled.`
+        : wslReap?.identityUnverified === true
+          ? `The recorded starttime for ${job.id} (pid ${survivors.join(", ")}) could not be verified against /proc; not marking cancelled.`
+          : `The WSL cursor-agent for ${job.id} (pid ${survivors.join(", ")}) survived TERM and KILL; not marking cancelled.`;
       appendLogLine(record.logFile, failureMessage);
       writeJobFile(workspaceRoot, job.id, {
         ...record,

@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 import { makeTempDir } from "./helpers.mjs";
 import {
@@ -43,12 +43,15 @@ test("upsertJob refuses to revive a terminal job", () => {
   assert.equal(job.pid ?? null, null);
 });
 
-test("concurrent state updates are serialized by the state lock", () => {
+test("concurrent state updates are serialized by the state lock", async () => {
   const workspace = makeTempDir();
   updateState(workspace, (state) => {
     state.config.counter = 0;
   });
 
+  // The workers must genuinely overlap or the lock is never contended: spawn
+  // them all before awaiting any (sequential spawnSync would serialize the
+  // increments without ever exercising the lock's retry path).
   const workers = 6;
   const incrementsPerWorker = 5;
   const script = `
@@ -59,11 +62,22 @@ test("concurrent state updates are serialized by the state lock", () => {
       });
     }
   `;
-  const results = Array.from({ length: workers }, () =>
-    spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-      encoding: "utf8",
-      env: process.env
-    })
+  const results = await Promise.all(
+    Array.from({ length: workers }, () =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+          env: process.env,
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        let stderr = "";
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("close", (status) => resolve({ status, stderr }));
+        child.on("error", (error) => resolve({ status: -1, stderr: String(error) }));
+      })
+    )
   );
   for (const result of results) {
     assert.equal(result.status, 0, result.stderr);

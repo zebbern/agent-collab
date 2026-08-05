@@ -34,7 +34,13 @@ function acquireStateLock(cwd) {
       fs.writeFileSync(lockFile, String(process.pid), { flag: "wx" });
       return lockFile;
     } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error)?.code !== "EEXIST") {
+      const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+      // EEXIST is plain contention. On Windows, racing a concurrent release
+      // or stale-steal can also surface as EPERM/EBUSY/EACCES while the old
+      // lock file is delete-pending — transient contention states, not
+      // failures: retrying either wins the recreate or times out into the
+      // warned unlocked path below.
+      if (code !== "EEXIST" && code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
         throw error;
       }
     }

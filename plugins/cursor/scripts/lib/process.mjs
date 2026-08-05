@@ -65,14 +65,20 @@ function createProcessTableError(message) {
 }
 
 function readUnixProcessTable(runCommandImpl, options = {}) {
+  // The raw lstart text is the identity payload (`pid@lstart`) compared as an
+  // opaque string across separate invocations (spawn-time snapshot vs
+  // cancel-time re-read). lstart rendering is LC_TIME-localized, so the
+  // locale must be pinned or the same process gets two different identities
+  // and cancel fail-closes on a spurious mismatch.
+  const env = { ...(options.env ?? process.env), LC_ALL: "C" };
   let result = runCommandImpl(UNIX_PS_COMMAND, UNIX_PROCESS_TABLE_ARGS, {
     cwd: options.cwd,
-    env: options.env
+    env
   });
   if (result.error?.code === "ENOENT") {
     result = runCommandImpl(UNIX_PS_PATH_COMMAND, UNIX_PROCESS_TABLE_ARGS, {
       cwd: options.cwd,
-      env: options.env
+      env
     });
   }
   if (result.error || result.status !== 0) {
@@ -583,6 +589,7 @@ export function probeWindowsProcessIdentity(pid, options = {}) {
     "powershell",
     [
       "-NoProfile",
+      "-NonInteractive",
       "-Command",
       `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}'; if ($p) { $p.CreationDate.ToFileTimeUtc() } else { 'ABSENT' }`
     ],
