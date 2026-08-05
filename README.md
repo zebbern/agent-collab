@@ -111,8 +111,8 @@ Same review quality as running `/review` inside Codex directly. Use `--base <ref
 Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. It uses the same review target selection as `/codex:review` (including `--base <ref>`), plus free-form focus text:
 
 ```bash
-/codex:adversarial-review --base main challenge whether this caching design is right
-/codex:adversarial-review --background look for race conditions
+/codex:adversarial-review --base main challenge whether this was the right caching and retry design
+/codex:adversarial-review --background look for race conditions and question the chosen approach
 ```
 
 #### `/codex:rescue`
@@ -137,6 +137,33 @@ You can also just ask: *"Ask Codex to redesign the database connection to be mor
 #### `/codex:transfer`
 
 Creates a persistent Codex thread from the current Claude Code session and prints `codex resume <session-id>`. The `SessionStart` hook supplies the transcript path automatically; `--source <path>` overrides it (must live under `~/.claude/projects`).
+
+### `/codex:status`
+
+Shows running and recent Codex jobs for the current repository — progress on background work, the latest completed job, and whether a task is still running.
+
+```bash
+/codex:status
+/codex:status task-abc123
+```
+
+### `/codex:result`
+
+Shows the final stored output for a finished job, including the Codex session ID so you can reopen the run with `codex resume <session-id>`.
+
+```bash
+/codex:result
+/codex:result task-abc123
+```
+
+### `/codex:cancel`
+
+Cancels an active background Codex job.
+
+```bash
+/codex:cancel
+/codex:cancel task-abc123
+```
 
 ### `/codex:setup`
 
