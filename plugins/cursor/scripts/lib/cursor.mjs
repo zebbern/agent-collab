@@ -29,6 +29,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { readJsonFile } from "./fs.mjs";
+import { appendStartupMetric } from "./state.mjs";
 import { binaryAvailable, runCommand } from "./process.mjs";
 
 const TEST_BINARY_ENV = "CURSOR_COMPANION_TEST_BINARY";
@@ -676,6 +677,10 @@ function applyStreamEvent(state, event, onProgress) {
       if (event.subtype === "init") {
         state.sessionId = event.session_id ?? state.sessionId;
         state.resolvedModel = typeof event.model === "string" && event.model ? event.model : state.resolvedModel;
+        // Explicit ready flag for the startup metric: sessionId is pre-seeded
+        // on --resume, so its truthiness cannot distinguish "agent is up"
+        // from "we knew the chat id before spawning".
+        state.initReceived = true;
         emitProgress(onProgress, `Cursor session ready (${state.sessionId ?? "unknown"}).`, "starting", {
           threadId: state.sessionId ?? null
         });
@@ -791,6 +796,26 @@ export async function runCursorTurn(cwd, options = {}) {
   );
 
   return new Promise((resolve, reject) => {
+    // Spawn->init is the segment a persistent transport would amortize (WSL
+    // relay + agent boot, or native process start) and excludes model time.
+    // The durable metric feeds the startup-overhead doctor check. Gate on the
+    // explicit init flag, never on sessionId: resume runs pre-seed sessionId,
+    // and measuring spawn->first-byte would systematically under-count the
+    // exact path the broker decision cares about.
+    const spawnedAt = Date.now();
+    let startupRecorded = false;
+    const recordStartupIfReady = () => {
+      if (startupRecorded || !state.initReceived) {
+        return;
+      }
+      startupRecorded = true;
+      appendStartupMetric(cwd, {
+        kind: "startup",
+        plugin: "cursor",
+        transport: invocation.transport ?? "native",
+        ms: Date.now() - spawnedAt
+      });
+    };
     const child = spawn(line.file, line.args, {
       cwd,
       env: process.env,
@@ -802,6 +827,7 @@ export async function runCursorTurn(cwd, options = {}) {
 
     const state = {
       sessionId: options.resumeChatId ?? null,
+      initReceived: false,
       resolvedModel: null,
       assistantText: "",
       thinkingBuffer: "",
@@ -855,6 +881,7 @@ export async function runCursorTurn(cwd, options = {}) {
         handleStreamLine(state, streamLine, options.onProgress);
         newlineIndex = stdoutBuffer.indexOf("\n");
       }
+      recordStartupIfReady();
     });
 
     child.stderr.on("data", (chunk) => {
@@ -881,6 +908,9 @@ export async function runCursorTurn(cwd, options = {}) {
       if (stdoutBuffer.trim()) {
         handleStreamLine(state, stdoutBuffer, options.onProgress);
       }
+      // An init that only arrived in the final unterminated buffer still
+      // counts as a startup sample.
+      recordStartupIfReady();
 
       const resultEvent = state.result;
       const isError = resultEvent ? resultEvent.is_error === true : exitCode !== 0;

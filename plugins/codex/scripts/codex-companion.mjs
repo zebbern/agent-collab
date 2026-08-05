@@ -47,6 +47,7 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  readStartupMetrics,
   resolveStateDir,
   setConfig,
   upsertJob,
@@ -65,6 +66,7 @@ import {
 import {
   buildLivenessProbe,
   buildProcessTableGuard,
+  buildStartupOverheadCheck,
   buildStateHygieneChecks,
   renderDoctorReport,
   runDoctorChecks
@@ -357,7 +359,8 @@ async function handleDoctor(argv) {
       jobs: listJobs(workspaceRoot),
       getLiveJobPidsImpl: buildLivenessProbe((jobs) => getLiveJobPids(jobs)),
       commandPrefix: "/codex"
-    })
+    }),
+    buildStartupOverheadCheck(() => readStartupMetrics(workspaceRoot))
   ];
 
   const report = await runDoctorChecks(checks);

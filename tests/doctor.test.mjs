@@ -13,6 +13,7 @@ import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import {
   buildLivenessProbe,
   buildProcessTableGuard,
+  buildStartupOverheadCheck,
   buildStateHygieneChecks,
   LIVENESS_SENTINEL_PID,
   renderDoctorReport,
@@ -156,6 +157,29 @@ test("orphaned job files with an empty index are reported as a possibly lost ind
   assert.equal(orphans.status, "warning");
   assert.match(orphans.message, /index may have been lost/);
   assert.doesNotMatch(orphans.message, /safe to delete/);
+});
+
+test("the startup-overhead check summarizes per transport and stays informational", async () => {
+  const empty = await runDoctorChecks([buildStartupOverheadCheck(() => [])]);
+  assert.equal(empty.overallStatus, "ok");
+  assert.match(empty.checks[0].message, /No startup samples yet/);
+
+  const report = await runDoctorChecks([
+    buildStartupOverheadCheck(() => [
+      { kind: "startup", transport: "direct", ms: 100 },
+      { kind: "startup", transport: "direct", ms: 300 },
+      { kind: "startup", transport: "direct", ms: 200 },
+      { kind: "startup", transport: "wsl", ms: 5000 },
+      { kind: "other", transport: "direct", ms: 999999 },
+      { kind: "startup", transport: "direct", ms: Number.NaN }
+    ])
+  ]);
+  const check = report.checks[0];
+  // Slow startup is decision input, never a health failure.
+  assert.equal(check.status, "ok");
+  assert.match(check.message, /4 sample\(s\)/);
+  assert.ok(check.details.some((line) => /direct: n=3, median 200ms/.test(line)), JSON.stringify(check.details));
+  assert.ok(check.details.some((line) => /wsl: n=1, median 5000ms/.test(line)), JSON.stringify(check.details));
 });
 
 test("state hygiene checks are all ok for a clean workspace", async () => {

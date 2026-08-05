@@ -103,6 +103,44 @@ export function buildProcessTableGuard(getLiveProcessPidsImpl) {
 }
 
 /**
+ * Summarizes the durable spawn->ready startup metrics per transport so the
+ * accumulated data is readable, not write-only. Always informational (ok):
+ * slow startup is a fact to weigh — e.g. for the persistent-broker decision —
+ * not a health problem.
+ */
+export function buildStartupOverheadCheck(readMetrics) {
+  return {
+    id: "startup-overhead",
+    run: () => {
+      const samples = readMetrics().filter(
+        (metric) => metric?.kind === "startup" && Number.isFinite(metric.ms)
+      );
+      if (samples.length === 0) {
+        return { status: "ok", message: "No startup samples yet; run a few jobs and check back." };
+      }
+      const byTransport = new Map();
+      for (const sample of samples) {
+        const key = sample.transport ?? "unknown";
+        if (!byTransport.has(key)) {
+          byTransport.set(key, []);
+        }
+        byTransport.get(key).push(sample.ms);
+      }
+      const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+      const details = [...byTransport.entries()].map(([transport, values]) => {
+        const sorted = [...values].sort((a, b) => a - b);
+        return `${transport}: n=${sorted.length}, median ${Math.round(quantile(sorted, 0.5))}ms, p90 ${Math.round(quantile(sorted, 0.9))}ms`;
+      });
+      return {
+        status: "ok",
+        message: `Spawn→ready startup overhead across ${samples.length} sample(s).`,
+        details
+      };
+    }
+  };
+}
+
+/**
  * State-hygiene checks shared by both plugins. The context carries the
  * plugin-specific pieces so this module stays provider-free:
  * { stateDir, jobs, getLiveJobPidsImpl, commandPrefix, staleLockMs? }.

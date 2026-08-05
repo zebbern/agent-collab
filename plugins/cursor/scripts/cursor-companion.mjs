@@ -37,7 +37,15 @@ import {
   terminateProcessTree
 } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-import { generateJobId, listJobs, resolveStateDir, upsertJob, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
+import {
+  generateJobId,
+  listJobs,
+  readStartupMetrics,
+  resolveStateDir,
+  upsertJob,
+  writeCancelFlag,
+  writeJobFile
+} from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
@@ -46,7 +54,13 @@ import {
   resolveCancelableJob,
   resolveResultJob
 } from "./lib/job-control.mjs";
-import { buildLivenessProbe, buildStateHygieneChecks, renderDoctorReport, runDoctorChecks } from "./lib/doctor.mjs";
+import {
+  buildLivenessProbe,
+  buildStartupOverheadCheck,
+  buildStateHygieneChecks,
+  renderDoctorReport,
+  runDoctorChecks
+} from "./lib/doctor.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -274,7 +288,8 @@ async function handleDoctor(argv) {
       jobs: listJobs(workspaceRoot),
       getLiveJobPidsImpl: buildLivenessProbe((jobs) => getLiveJobPids(jobs)),
       commandPrefix: "/cursor"
-    })
+    }),
+    buildStartupOverheadCheck(() => readStartupMetrics(workspaceRoot))
   ];
 
   const report = await runDoctorChecks(checks);

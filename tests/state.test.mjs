@@ -8,9 +8,12 @@ import { spawn } from "node:child_process";
 
 import { makeTempDir } from "./helpers.mjs";
 import {
+  appendStartupMetric,
   ensureStateDir,
   listJobs,
   loadState,
+  readStartupMetrics,
+  resolveMetricsFile,
   resolveJobFile,
   resolveJobLogFile,
   resolveJobsDir,
@@ -436,6 +439,35 @@ test("a state root owned by another user is refused (squat resistance)", (t) => 
       process.env.CLAUDE_PLUGIN_DATA = previous;
     }
   }
+});
+
+test("startup metrics append durably, rotate at the size cap, and tolerate junk lines", (t) => {
+  const workspace = makeTempDir();
+  appendStartupMetric(workspace, { kind: "startup", plugin: "codex", transport: "direct", ms: 123 });
+  appendStartupMetric(workspace, { kind: "startup", plugin: "codex", transport: "direct", ms: 456 });
+  const metricsFile = resolveMetricsFile(workspace);
+  fs.appendFileSync(metricsFile, "not json\n");
+  appendStartupMetric(workspace, { kind: "startup", plugin: "codex", transport: "broker", ms: 7 });
+
+  const metrics = readStartupMetrics(workspace);
+  assert.deepEqual(metrics.map((m) => m.ms), [123, 456, 7]);
+  assert.ok(metrics.every((m) => typeof m.at === "string"));
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(metricsFile).mode & 0o777, 0o600);
+  }
+
+  // Push past the rotation cap: the current file rotates to .old and appends
+  // continue fresh, but readers span BOTH generations, so rotation never
+  // hides the history doctor and the broker decision read.
+  appendStartupMetric(workspace, { kind: "startup", plugin: "codex", transport: "direct", ms: 111 });
+  fs.appendFileSync(metricsFile, `${"x".repeat(600 * 1024)}\n`);
+  appendStartupMetric(workspace, { kind: "startup", plugin: "codex", transport: "direct", ms: 222 });
+  assert.equal(fs.existsSync(`${metricsFile}.old`), true);
+  // The pre-rotation 111 survives via .old; the post-rotation 222 is in the
+  // current file; the giant junk line parses to null and is dropped.
+  const afterRotation = readStartupMetrics(workspace).map((m) => m.ms);
+  assert.ok(afterRotation.includes(111), JSON.stringify(afterRotation));
+  assert.ok(afterRotation.includes(222), JSON.stringify(afterRotation));
 });
 
 test("a corrupt state.json is quarantined and the rebuilt index is persisted", () => {

@@ -41,6 +41,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
+import { appendStartupMetric } from "./state.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, BROKER_OWNERSHIP_RPC_CODE, BROKER_STREAM_COMPLETED_METHOD, CodexAppServerClient } from "./app-server.mjs";
 import { loadReusableBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
@@ -699,10 +700,26 @@ function announceTransportFallback(client, onDegraded) {
   onDegraded?.(reason, message);
 }
 
+// Spawn->ready is the segment a persistent broker would amortize: connect
+// covers process spawn (direct) or socket attach (broker) plus the initialize
+// handshake, and excludes model time entirely. The durable metric feeds the
+// startup-overhead doctor check and, eventually, the Windows-broker decision.
+async function connectAppServerClient(cwd, options) {
+  const startedAt = Date.now();
+  const client = await CodexAppServerClient.connect(cwd, options);
+  appendStartupMetric(cwd, {
+    kind: "startup",
+    plugin: "codex",
+    transport: client.transport ?? "direct",
+    ms: Date.now() - startedAt
+  });
+  return client;
+}
+
 async function withAppServer(cwd, fn, options = {}) {
   let client = null;
   try {
-    client = await CodexAppServerClient.connect(cwd);
+    client = await connectAppServerClient(cwd);
     announceTransportFallback(client, options.onDegraded);
     const result = await fn(client);
     await client.close();
@@ -723,7 +740,7 @@ async function withAppServer(cwd, fn, options = {}) {
       throw error;
     }
 
-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+    const directClient = await connectAppServerClient(cwd, { disableBroker: true });
     directClient.transportFallback = transportFallbackReasonForError(error);
     announceTransportFallback(directClient, options.onDegraded);
     try {
@@ -735,7 +752,7 @@ async function withAppServer(cwd, fn, options = {}) {
 }
 
 async function withDirectAppServer(cwd, fn) {
-  const client = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+  const client = await connectAppServerClient(cwd, { disableBroker: true });
   try {
     return await fn(client);
   } finally {

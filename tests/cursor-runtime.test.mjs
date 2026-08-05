@@ -16,7 +16,7 @@ import { spawn } from "node:child_process";
 
 import { buildCursorEnv, installFakeCursorAgent } from "./fake-cursor-agent-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
-import { resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
+import { readStartupMetrics, resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs");
@@ -242,6 +242,14 @@ test("task --resume passes --resume and keeps the prior chat id", () => {
 
   const { storedJob } = readLatestJob(repo);
   assert.equal(storedJob.threadId, "sess-prior");
+
+  // A resume run must still record a startup sample — the init-gated recorder
+  // (not sessionId presence, which is pre-seeded on resume) fires when the
+  // agent's init event lands.
+  const metrics = readStartupMetrics(repo).filter((m) => m.kind === "startup");
+  assert.equal(metrics.length, 1, JSON.stringify(metrics));
+  assert.equal(metrics[0].plugin, "cursor");
+  assert.ok(Number.isFinite(metrics[0].ms));
 });
 
 test("task surfaces the Cursor auth error when the run is rejected", () => {

@@ -52,6 +52,8 @@ function ensurePrivateDir(dir, { create }) {
 const STATE_FILE_NAME = "state.json";
 const STATE_LOCK_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
+const METRICS_FILE_NAME = "metrics.jsonl";
+const METRICS_ROTATE_BYTES = 512 * 1024;
 const MAX_JOBS = 50;
 const STATE_LOCK_TIMEOUT_MS = 5_000;
 const STATE_LOCK_STALE_MS = 10_000;
@@ -180,6 +182,68 @@ export function ensureStateDir(cwd) {
   ensurePrivateDir(resolveStateRoot(), { create: false });
   ensurePrivateDir(stateDir, { create: true });
   ensurePrivateDir(jobsDir, { create: true });
+}
+
+export function resolveMetricsFile(cwd) {
+  return path.join(resolveStateDir(cwd), METRICS_FILE_NAME);
+}
+
+// Startup metrics deliberately accumulate OUTSIDE the 50-job prune window:
+// the per-job spawn->ready overhead is the dataset that decides whether a
+// persistent Windows broker is worth building, and a rolling 50 jobs is not
+// a dataset. Append-only JSONL, rotated once to .old past the size cap so
+// growth stays bounded; readers span .old plus current, so rotation never
+// hides history from doctor. Rotate+append run under the state lock so
+// concurrent jobs cannot double-rotate and destroy the archive. Best-effort:
+// metrics must never sink the run that produced them.
+export function appendStartupMetric(cwd, record) {
+  try {
+    ensureStateDir(cwd);
+    const metricsFile = resolveMetricsFile(cwd);
+    withStateLock(cwd, () => {
+      try {
+        if (fs.statSync(metricsFile).size > METRICS_ROTATE_BYTES) {
+          const archived = `${metricsFile}.old`;
+          // Two generations are retained by design. The lock prevents the
+          // concurrent double-rotate that could wipe a just-rotated archive;
+          // a rare failed rename here costs only the OLDER generation (the
+          // one being replaced), never the current file, which stays intact
+          // and rotates on a later attempt.
+          fs.rmSync(archived, { force: true });
+          fs.renameSync(metricsFile, archived);
+        }
+      } catch {
+        // Missing file or failed rotation: append regardless.
+      }
+      fs.appendFileSync(metricsFile, `${JSON.stringify({ at: nowIso(), ...record })}\n`, { mode: 0o600 });
+    });
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function readMetricsLines(file) {
+  try {
+    return fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function readStartupMetrics(cwd) {
+  const metricsFile = resolveMetricsFile(cwd);
+  return [...readMetricsLines(`${metricsFile}.old`), ...readMetricsLines(metricsFile)];
 }
 
 export function loadState(cwd) {
