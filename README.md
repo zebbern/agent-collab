@@ -214,6 +214,7 @@ Drives Cursor's headless [`cursor-agent`](https://cursor.com/docs/cli) CLI. Ever
 | `/cursor:review` | Read-only review of your working tree or branch (`--base <ref>`, `--background`) |
 | `/cursor:adversarial-review` | Steerable challenge review with focus text |
 | `/cursor:task` | Delegate a task (`--model`, `--resume <chat-id>`, `--write`, `--background`) |
+| `/cursor:rescue` | Hand a problem to the `cursor:cursor-rescue` subagent — investigate, fix, or continue with `--resume <chat-id>` |
 | `/cursor:status` / `/cursor:result` / `/cursor:cancel` | Track, read, and stop background jobs |
 | `/cursor:setup` | Readiness check with per-platform install guidance |
 | `/cursor:help` | Full CLI usage |

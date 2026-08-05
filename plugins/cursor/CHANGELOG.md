@@ -14,6 +14,17 @@ Initial release.
 This plugin is derived from the codex plugin chassis in this repository, itself a
 fork of the OpenAI Codex plugin for Claude Code (Apache-2.0). See NOTICE.
 
+## 0.3.0
+
+- Skill and rescue parity with the codex plugin: `/cursor:rescue` hands a task
+  to the new `cursor:cursor-rescue` forwarder subagent, guided by three new
+  internal skills — `cursor-cli-runtime` (the forwarder contract),
+  `cursor-prompting` (prompt shaping and model selection across Cursor's
+  router; `auto` by default, `cursor-agent --list-models` as the roster), and
+  `cursor-result-handling` (presentation rules, including the hard stop
+  against auto-applying review fixes). Cursor has no resume-last shortcut, so
+  rescue resume always takes an explicit `--resume <chat-id>`.
+
 ## 0.2.0
 
 - Cancel now proves ownership before killing anything. Workers persist a
