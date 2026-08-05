@@ -4,8 +4,35 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+// Temp dirs created by tests are best-effort removed when the test process
+// exits, so a normal run stops piling up thousands of scratch dirs under
+// %TEMP%. Hard-killed runs (SIGKILL, app close) skip this; scripts/reap-test-
+// residue.mjs mops those up on demand. Cleanup is per-dir best-effort so a
+// dir still held by a detached worker never breaks teardown.
+const trackedTempDirs = [];
+let tempCleanupRegistered = false;
+
+function registerTempCleanup() {
+  if (tempCleanupRegistered) {
+    return;
+  }
+  tempCleanupRegistered = true;
+  process.on("exit", () => {
+    for (const dir of trackedTempDirs) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // In use or already gone; the reaper handles the remainder.
+      }
+    }
+  });
+}
+
 export function makeTempDir(prefix = "codex-plugin-test-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  registerTempCleanup();
+  trackedTempDirs.push(dir);
+  return dir;
 }
 
 export function writeExecutable(filePath, source) {
