@@ -85,7 +85,10 @@ function formatElapsedDuration(startValue, endValue = null) {
   }
 
   const end = endValue ? Date.parse(endValue) : Date.now();
-  if (!Number.isFinite(end) || end < start) {
+  // Tolerate small clock skew: filesystem mtimes can land a few milliseconds
+  // ahead of Date.now() (NTFS rounding), and the freshest activity must not
+  // render as "no signal". Math.max below clamps the skew to 0s.
+  if (!Number.isFinite(end) || end < start - 2000) {
     return null;
   }
 

@@ -113,14 +113,14 @@ export async function acquireBrokerLaunchLock(cwd, options = {}) {
     }
     const observed = await probeBrokerLaunchPort(port, greeting);
     if (observed === "foreign") {
-      const error = new Error("The deterministic Codex broker launch lock is occupied by another local service.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("The deterministic Codex broker launch lock is occupied by another local service."));
       error.code = "BROKER_LAUNCH_LOCK_UNAVAILABLE";
       throw error;
     }
     await delay(25);
   }
 
-  const error = new Error("Timed out waiting for another Codex broker launch to finish.");
+  const error = /** @type {Error & { code?: string }} */ (new Error("Timed out waiting for another Codex broker launch to finish."));
   error.code = "BROKER_LAUNCH_LOCK_TIMEOUT";
   throw error;
 }
@@ -193,7 +193,7 @@ export function activateBrokerProcess(child, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
     const status = child?.stdio?.[3];
     if (!child?.stdin || !status) {
-      const error = new Error("Broker activation channels are unavailable.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("Broker activation channels are unavailable."));
       error.code = "BROKER_ACTIVATION_FAILED";
       reject(error);
       return;
@@ -226,7 +226,7 @@ export function activateBrokerProcess(child, timeoutMs = 2000) {
       resolve();
     };
     const activationError = (message) => {
-      const error = new Error(message);
+      const error = /** @type {Error & { code?: string }} */ (new Error(message));
       error.code = "BROKER_ACTIVATION_FAILED";
       return error;
     };
@@ -356,8 +356,8 @@ export function loadReusableBrokerSession(cwd, env = process.env) {
   });
   if (
     registration.registered !== true ||
-    registration.brokerKey !== session.registry.brokerKey ||
-    registration.registryDir !== session.registry.registryDir
+    /** @type {{ brokerKey?: unknown }} */ (registration).brokerKey !== session.registry.brokerKey ||
+    /** @type {{ registryDir?: string }} */ (registration).registryDir !== session.registry.registryDir
   ) {
     return null;
   }
@@ -423,7 +423,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
   const releaseRegistryLock = options.releaseBrokerRegistryLockImpl ?? releaseBrokerRegistryLock;
   const registryLock = acquireRegistryLock(existing.registry);
   if (registryLock?.acquired !== true) {
-    const error = new Error(`Broker cleanup eligibility could not be locked (${registryLock?.reason ?? "unknown"}).`);
+    const error = /** @type {Error & { code?: string }} */ (new Error(`Broker cleanup eligibility could not be locked (${registryLock?.reason ?? "unknown"}).`));
     error.code = "BROKER_CLEANUP_UNVERIFIED";
     throw error;
   }
@@ -440,7 +440,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
       registration.brokerKey !== existing.registry.brokerKey ||
       registration.registryDir !== existing.registry.registryDir
     ) {
-      const error = new Error("The existing Codex broker registration is invalid; cleanup remains report-only.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("The existing Codex broker registration is invalid; cleanup remains report-only."));
       error.code = "BROKER_REGISTRATION_REQUIRED";
       throw error;
     }
@@ -450,13 +450,13 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
     try {
       currentIdentity = readProcessIdentity(existing.pid, { cwd, env });
     } catch (cause) {
-      const error = new Error("Broker liveness could not be verified; cleanup remains report-only.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("Broker liveness could not be verified; cleanup remains report-only."));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       error.cause = cause;
       throw error;
     }
     if (currentIdentity && currentIdentity !== existing.pidIdentity) {
-      const error = new Error("The saved broker PID has been reused; refusing to signal it or start a replacement.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("The saved broker PID has been reused; refusing to signal it or start a replacement."));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       throw error;
     }
@@ -467,7 +467,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
         if (assessment?.reason === "live-owner") {
           return { cleaned: false, blockedByLiveOwner: true };
         }
-        const error = new Error(`Broker ownership is ambiguous (${assessment?.reason ?? "unknown"}); cleanup remains report-only.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Broker ownership is ambiguous (${assessment?.reason ?? "unknown"}); cleanup remains report-only.`));
         error.code = "BROKER_CLEANUP_UNVERIFIED";
         throw error;
       }
@@ -477,7 +477,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
       const loadChildren = options.loadBrokerChildrenImpl ?? loadBrokerChildren;
       const children = loadChildren(registration);
       if (children?.valid !== true) {
-        const error = new Error(`Registered broker children are invalid (${children?.reason ?? "unknown"}); cleanup remains report-only.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Registered broker children are invalid (${children?.reason ?? "unknown"}); cleanup remains report-only.`));
         error.code = "BROKER_CLEANUP_UNVERIFIED";
         throw error;
       }
@@ -491,7 +491,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
           env
         });
         if (outcome?.verified !== true) {
-          const error = new Error("Registered broker child cleanup is unverified; refusing to start a replacement broker.");
+          const error = /** @type {Error & { code?: string }} */ (new Error("Registered broker child cleanup is unverified; refusing to start a replacement broker."));
           error.code = "BROKER_CLEANUP_UNVERIFIED";
           throw error;
         }
@@ -501,7 +501,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
           registryLock
         });
         if (released?.released !== true) {
-          const error = new Error(`Registered broker child release failed (${released?.reason ?? "unknown"}); refusing to start a replacement broker.`);
+          const error = /** @type {Error & { code?: string }} */ (new Error(`Registered broker child release failed (${released?.reason ?? "unknown"}); refusing to start a replacement broker.`));
           error.code = "BROKER_CLEANUP_UNVERIFIED";
           throw error;
         }
@@ -521,7 +521,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
       killProcess: options.killProcess ?? terminateProcessTree
     });
     if (cleanup?.verified !== true) {
-      const error = new Error("Broker cleanup is unverified; refusing to start another broker session.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("Broker cleanup is unverified; refusing to start another broker session."));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       throw error;
     }
@@ -530,7 +530,7 @@ async function cleanupExistingBrokerSession(cwd, existing, options) {
   } finally {
     const released = releaseRegistryLock(existing.registry, registryLock);
     if (released?.released !== true) {
-      const error = new Error(`Broker registry lock release failed (${released?.reason ?? "unknown"}).`);
+      const error = /** @type {Error & { code?: string }} */ (new Error(`Broker registry lock release failed (${released?.reason ?? "unknown"}).`));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       throw error;
     }
@@ -557,7 +557,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
       const readProcessIdentity = options.getProcessIdentityImpl ?? getProcessIdentity;
       existingProcessIdentity = readProcessIdentity(existing.pid, { cwd, env });
     } catch (cause) {
-      const error = new Error("Existing broker liveness could not be verified; refusing reuse or replacement.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("Existing broker liveness could not be verified; refusing reuse or replacement."));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       error.cause = cause;
       throw error;
@@ -607,7 +607,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
     } finally {
       const released = releaseRegistryLock(existing.registry, registryLock);
       if (released?.released !== true) {
-        const error = new Error(`Broker registry lock release failed (${released?.reason ?? "unknown"}).`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Broker registry lock release failed (${released?.reason ?? "unknown"}).`));
         error.code = "BROKER_CLEANUP_UNVERIFIED";
         throw error;
       }
@@ -670,7 +670,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
   if (!ready) {
     const cleanup = await rollbackNewBrokerSession(cwd, child, session, options);
     if (cleanup?.verified !== true) {
-      const error = new Error("Failed broker startup cleanup is unverified; refusing to create or hide another process.");
+      const error = /** @type {Error & { code?: string }} */ (new Error("Failed broker startup cleanup is unverified; refusing to create or hide another process."));
       error.code = "BROKER_CLEANUP_UNVERIFIED";
       throw error;
     }
@@ -736,7 +736,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
       }
     }
     if (cleanup?.verified !== true) {
-      const cleanupError = new Error(`Broker launch failed and exact rollback is unverified: ${error.message}`);
+      const cleanupError = /** @type {Error & { code?: string }} */ (new Error(`Broker launch failed and exact rollback is unverified: ${error.message}`));
       cleanupError.code = "BROKER_CLEANUP_UNVERIFIED";
       cleanupError.cause = error;
       throw cleanupError;
@@ -745,7 +745,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
       options.onUnavailable?.("broker registration unavailable");
       return null;
     }
-    const transactionError = new Error(`Broker launch transaction failed: ${error.message}`);
+    const transactionError = /** @type {Error & { code?: string }} */ (new Error(`Broker launch transaction failed: ${error.message}`));
     transactionError.code = "BROKER_REGISTRATION_FAILED";
     transactionError.cause = error;
     throw transactionError;
@@ -754,7 +754,7 @@ async function ensureBrokerSessionLocked(cwd, options = {}) {
       const releaseRegistryLock = options.releaseBrokerRegistryLockImpl ?? releaseBrokerRegistryLock;
       const released = releaseRegistryLock(session.registry, transactionRegistryLock);
       if (released?.released !== true) {
-        const lockError = new Error(`Broker launch transaction lock release failed (${released?.reason ?? "unknown"}).`);
+        const lockError = /** @type {Error & { code?: string }} */ (new Error(`Broker launch transaction lock release failed (${released?.reason ?? "unknown"}).`));
         lockError.code = "BROKER_CLEANUP_UNVERIFIED";
         throw lockError;
       }

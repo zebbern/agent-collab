@@ -62,14 +62,14 @@ function cleanCodexStderr(stderr) {
 
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
-  return {
+  return /** @type {ThreadStartParams} */ ({
     cwd,
     model: options.model ?? null,
     approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only",
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
-  };
+  });
 }
 
 /** @returns {ThreadResumeParams} */

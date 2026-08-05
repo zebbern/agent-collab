@@ -40,7 +40,7 @@ const ENFORCE_POSIX_MODES = process.platform !== "win32";
 function requirePrivateDirectory(dirPath) {
   const stat = fs.lstatSync(dirPath);
   if (stat.isSymbolicLink() || !stat.isDirectory() || (ENFORCE_POSIX_MODES && (stat.mode & 0o777) !== 0o700)) {
-    const error = new Error(`Broker ownership registry directory is not private: ${dirPath}.`);
+    const error = /** @type {Error & { code?: string }} */ (new Error(`Broker ownership registry directory is not private: ${dirPath}.`));
     error.code = "BROKER_OWNERSHIP_PERMISSIONS";
     throw error;
   }
@@ -50,7 +50,7 @@ function requirePrivateDirectory(dirPath) {
 function requirePrivateFile(filePath) {
   const stat = fs.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile() || (ENFORCE_POSIX_MODES && (stat.mode & 0o777) !== 0o600)) {
-    const error = new Error(`Broker ownership registry file is not private: ${filePath}.`);
+    const error = /** @type {Error & { code?: string }} */ (new Error(`Broker ownership registry file is not private: ${filePath}.`));
     error.code = "BROKER_OWNERSHIP_PERMISSIONS";
     throw error;
   }
@@ -61,7 +61,7 @@ function ensurePrivateDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dirPath);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    const error = new Error(`Refusing non-directory broker ownership path: ${dirPath}.`);
+    const error = /** @type {Error & { code?: string }} */ (new Error(`Refusing non-directory broker ownership path: ${dirPath}.`));
     error.code = "BROKER_OWNERSHIP_PERMISSIONS";
     throw error;
   }
@@ -79,7 +79,7 @@ function createImmutableJson(filePath, payload) {
   if (fs.existsSync(filePath)) {
     requirePrivateFile(filePath);
     if (fs.readFileSync(filePath, "utf8") !== bytes) {
-      const error = new Error(`Broker ownership registry collision at ${filePath}.`);
+      const error = /** @type {Error & { code?: string }} */ (new Error(`Broker ownership registry collision at ${filePath}.`));
       error.code = "BROKER_OWNERSHIP_COLLISION";
       throw error;
     }
@@ -360,7 +360,7 @@ function withBrokerRegistryLock(registration, options, action) {
     if (!suppliedLock) {
       const released = releaseBrokerRegistryLock(registration, lock);
       if (released.released !== true) {
-        const error = new Error(`Unable to release broker registry lock (${released.reason}).`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Unable to release broker registry lock (${released.reason}).`));
         error.code = "BROKER_REGISTRY_LOCK_RELEASE_FAILED";
         throw error;
       }
@@ -623,7 +623,7 @@ export function registerBrokerOwner(registration, options = {}) {
     if (fs.existsSync(ownerPath)) {
       const existing = readJson(ownerPath);
       if (!validOwnerRecord(existing, ownerPath, registration)) {
-        const error = new Error(`Invalid existing broker owner row at ${ownerPath}.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Invalid existing broker owner row at ${ownerPath}.`));
         error.code = "BROKER_OWNERSHIP_COLLISION";
         throw error;
       }
@@ -676,7 +676,7 @@ export function releaseBrokerOwner(registration, options = {}) {
     if (fs.existsSync(releasePath)) {
       const existing = readJson(releasePath);
       if (!validReleaseRecord(existing, releasePath, registration)) {
-        const error = new Error(`Invalid existing broker owner release at ${releasePath}.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Invalid existing broker owner release at ${releasePath}.`));
         error.code = "BROKER_OWNERSHIP_COLLISION";
         throw error;
       }
@@ -975,7 +975,7 @@ export function releaseBrokerChild(
     if (fs.existsSync(releasePath)) {
       const existing = readJson(releasePath);
       if (!validChildReleaseRecord(existing, releasePath, registration, child)) {
-        const error = new Error(`Invalid existing broker child release at ${releasePath}.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Invalid existing broker child release at ${releasePath}.`));
         error.code = "BROKER_OWNERSHIP_COLLISION";
         throw error;
       }
@@ -1212,7 +1212,7 @@ export function publishBrokerChild(registration, options = {}) {
         existing.pidIdentity !== identity ||
         JSON.stringify(existing.ownershipSnapshot) !== JSON.stringify(ownershipSnapshot)
       ) {
-        const error = new Error(`Invalid existing broker child row at ${childPath}.`);
+        const error = /** @type {Error & { code?: string }} */ (new Error(`Invalid existing broker child row at ${childPath}.`));
         error.code = "BROKER_OWNERSHIP_COLLISION";
         throw error;
       }

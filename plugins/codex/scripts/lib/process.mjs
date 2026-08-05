@@ -59,7 +59,7 @@ const UNIX_PS_COMMAND = "/bin/ps";
 const UNIX_PS_PATH_COMMAND = "ps";
 
 function createProcessTableError(message) {
-  const error = new Error(message);
+  const error = /** @type {Error & { code?: string }} */ (new Error(message));
   error.code = "PROCESS_TABLE_UNAVAILABLE";
   return error;
 }

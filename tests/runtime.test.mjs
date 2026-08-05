@@ -4856,12 +4856,14 @@ test("shared broker clears a disconnected stream after its request rejects", asy
     })
     .catch(() => null);
 
+  // 15s windows: the fake app-server's reject round-trip regularly exceeds
+  // the 5s default on loaded CI runners.
   await waitFor(() => {
     if (!fs.existsSync(fakeStatePath)) {
       return false;
     }
     return JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).turnRejectPending === true;
-  });
+  }, { timeoutMs: 15000 });
   await clientA.close();
   await pendingTurn;
 
@@ -4870,7 +4872,7 @@ test("shared broker clears a disconnected stream after its request rejects", asy
       return false;
     }
     return JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).turnRejectSent === true;
-  });
+  }, { timeoutMs: 15000 });
 
   const clientB = await CodexAppServerClient.connect(repo, { env });
   t.after(() => clientB.close().catch(() => {}));

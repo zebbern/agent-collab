@@ -34,7 +34,7 @@ const DEFAULT_CLIENT_INFO = {
   version: PLUGIN_MANIFEST.version ?? "0.0.0"
 };
 
-/** @type {InitializeCapabilities} */
+/** @type {InitializeCapabilities & { requestAttestation?: boolean }} */
 const DEFAULT_CAPABILITIES = {
   experimentalApi: false,
   requestAttestation: false,
@@ -73,6 +73,10 @@ class AppServerClientBase {
     this.notificationHandler = null;
     this.lineBuffer = "";
     this.transport = "unknown";
+    /** @type {string | null} */
+    this.transportFallback = null;
+    /** @type {Partial<ReturnType<typeof normalizeProcessCleanupOutcome>> | null} */
+    this.cleanupOutcome = null;
 
     this.exitPromise = new Promise((resolve) => {
       this.resolveExit = resolve;
@@ -266,7 +270,7 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
       if (!activationControl) {
         throw new Error("Codex app-server activation control is unavailable.");
       }
-      activationControl.end("activate\n");
+      /** @type {import("node:stream").Writable} */ (activationControl).end("activate\n");
     }
     await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
@@ -414,7 +418,7 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
     }
 
     if (this.proc) {
-      this.proc.stdio?.[3]?.end?.();
+      /** @type {import("node:stream").Writable | undefined} */ (this.proc.stdio?.[3])?.end?.();
       try {
         this.proc.stdin.end();
       } catch {
