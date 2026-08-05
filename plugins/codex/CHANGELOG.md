@@ -20,6 +20,7 @@ Versions up to and including 1.0.6 are upstream releases of
 - Registry lock contention is classified correctly on Windows: rename-onto-existing-directory raises `EPERM` there (not `EEXIST`/`ENOTEMPTY`), which is now treated as contention/retry instead of a fatal error, in both the acquisition and stale-lock-quarantine paths.
 - `taskkill`/`tasklist` are invoked with `shell: false` (inherited upstream bug): under Git Bash the MSYS layer rewrote `/PID` into a filesystem path, making every cancel-path kill fail with "Invalid argument".
 - `createBrokerEndpoint` uses `path.posix.join` for its non-Windows branch, honoring the injected platform (inherited upstream bug).
+- Jobs now record which model they were handed to: task and review results persist a `model` field (the explicit `--model` value, or `null` for the Codex config default), and `/codex:status` renders a `Model:` line — `Model: gpt-5.4-codex` or `Model: default (Codex config)`. Job files from before this change simply show no line.
 - The test suite is now green on Windows: POSIX-only contracts (socket paths, permission-mode assertions, unprivileged symlinks, shared-broker lifecycle) are platform-gated or skipped in the suite's existing skip style, transfer tests are hermetic on Windows (`USERPROFILE` was leaking the real profile into sandboxes), and fixtures avoid symlink-privilege and `spawn` PATHEXT pitfalls.
 
 ## 1.0.6

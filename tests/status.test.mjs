@@ -197,6 +197,29 @@ test("enrichJob surfaces the stored transport only when the result payload carri
   assert.equal(Object.hasOwn(legacy, "transportReason"), false);
 });
 
+test("enrichJob surfaces the stored model only when the result payload carries it", () => {
+  const explicit = enrichJob(
+    { id: "task-model", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },
+    { storedResult: { model: "gpt-5.4-codex" } }
+  );
+  assert.equal(explicit.model, "gpt-5.4-codex");
+  assert.equal(explicit.modelRecorded, true);
+
+  const configDefault = enrichJob(
+    { id: "task-model-default", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },
+    { storedResult: { model: null } }
+  );
+  assert.equal(configDefault.model, null);
+  assert.equal(configDefault.modelRecorded, true);
+
+  const legacy = enrichJob(
+    { id: "task-model-legacy", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },
+    { storedResult: { transport: "direct" } }
+  );
+  assert.equal(Object.hasOwn(legacy, "model"), false);
+  assert.equal(Object.hasOwn(legacy, "modelRecorded"), false);
+});
+
 test("enrichJob marks stale queued jobs without a pid as likely dead", () => {
   const nowMs = Date.parse("2026-03-24T20:00:00.000Z");
   const stale = enrichJob(

@@ -396,6 +396,7 @@ async function executeReviewRun(request) {
       target,
       threadId: result.threadId,
       sourceThreadId: result.sourceThreadId,
+      model: result.model ?? null,
       codex: {
         status: result.status,
         stderr: result.stderr,
@@ -544,7 +545,8 @@ async function executeTaskRun(request) {
     commandExecutions: boundTelemetryItems(result.commandExecutions),
     tokenUsage: result.turn?.tokenUsage ?? null,
     transport: result.transport ?? null,
-    transportReason: result.transportReason ?? null
+    transportReason: result.transportReason ?? null,
+    model: result.model ?? null
   };
 
   return {

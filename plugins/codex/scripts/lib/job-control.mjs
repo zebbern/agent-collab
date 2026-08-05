@@ -349,6 +349,17 @@ function readJobTransport(storedResult) {
   return transportReason ? { transport, transportReason } : { transport };
 }
 
+function readJobModel(storedResult) {
+  // Older job files predate the model field; only surface it when the record
+  // actually carries one. model: null means "no --model given" — the run used
+  // the Codex config default — which render distinguishes from an absent record.
+  if (!storedResult || typeof storedResult !== "object" || !Object.hasOwn(storedResult, "model")) {
+    return {};
+  }
+  const model = typeof storedResult.model === "string" && storedResult.model ? storedResult.model : null;
+  return { model, modelRecorded: true };
+}
+
 export function enrichJob(job, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
   const workspaceRoot = options.workspaceRoot ?? job.workspaceRoot ?? null;
@@ -362,6 +373,7 @@ export function enrichJob(job, options = {}) {
         : [],
     progressSignals: buildProgressSignals(job, { ...options, storedResult }),
     ...readJobTransport(storedResult),
+    ...readJobModel(storedResult),
     liveness: deriveJobLiveness(job, options),
     elapsed: formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? null),
     duration:

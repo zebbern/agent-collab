@@ -2458,6 +2458,7 @@ test("task run warns once, logs once, and records the direct transport when the 
   const storedJob = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
   assert.equal(storedJob.result.transport, "direct");
   assert.equal(storedJob.result.transportReason, expectedReason);
+  assert.equal(storedJob.result.model, null);
 
   const logLines = fs.readFileSync(storedJob.logFile, "utf8").split(/\r?\n/).filter((line) => line.includes("shared Codex runtime unavailable"));
   assert.equal(logLines.length, 1);
@@ -2468,6 +2469,7 @@ test("task run warns once, logs once, and records the direct transport when the 
   });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, new RegExp(`Transport: private Codex process \\(${expectedReason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
+  assert.match(status.stdout, /Model: default \(Codex config\)/);
 });
 
 test("broker transport runs record the shared transport without a fallback warning", async (t) => {

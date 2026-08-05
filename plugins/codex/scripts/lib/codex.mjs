@@ -1093,7 +1093,8 @@ export async function runAppServerReview(cwd, options = {}) {
       error: turnState.error,
       stderr: cleanCodexStderr(client.stderr),
       transport: client.transport,
-      transportReason: client.transportFallback ?? null
+      transportReason: client.transportFallback ?? null,
+      model: options.model ?? null
     };
   }, {
     onDegraded: (_reason, message) => {
@@ -1203,7 +1204,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       commandExecutions: turnState.commandExecutions,
       transport: client.transport,
-      transportReason: client.transportFallback ?? null
+      transportReason: client.transportFallback ?? null,
+      model: options.model ?? null
     };
   }, {
     onDegraded: (_reason, message) => {

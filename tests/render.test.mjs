@@ -263,6 +263,36 @@ test("renderJobStatusReport shows the transport line only when the job record ca
   assert.doesNotMatch(legacy, /Transport:/);
 });
 
+test("renderJobStatusReport shows the model line only when the job record carries it", () => {
+  const explicit = renderJobStatusReport({
+    id: "task-82",
+    status: "completed",
+    kindLabel: "rescue",
+    title: "Codex Task",
+    model: "gpt-5.4-codex",
+    modelRecorded: true
+  });
+  assert.match(explicit, /Model: gpt-5\.4-codex/);
+
+  const configDefault = renderJobStatusReport({
+    id: "task-83",
+    status: "completed",
+    kindLabel: "rescue",
+    title: "Codex Task",
+    model: null,
+    modelRecorded: true
+  });
+  assert.match(configDefault, /Model: default \(Codex config\)/);
+
+  const legacy = renderJobStatusReport({
+    id: "task-84",
+    status: "completed",
+    kindLabel: "rescue",
+    title: "Codex Task"
+  });
+  assert.doesNotMatch(legacy, /Model:/);
+});
+
 function buildSetupReportFixture(overrides = {}) {
   return {
     ready: true,

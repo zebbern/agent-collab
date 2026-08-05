@@ -151,6 +151,9 @@ function pushJobDetails(lines, job, options = {}) {
       job.transport === "broker" ? "shared Codex runtime" : job.transport === "direct" ? "private Codex process" : job.transport;
     lines.push(`  Transport: ${transportLabel}${job.transportReason ? ` (${job.transportReason})` : ""}`);
   }
+  if (job.modelRecorded) {
+    lines.push(`  Model: ${job.model ?? "default (Codex config)"}`);
+  }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
   }
