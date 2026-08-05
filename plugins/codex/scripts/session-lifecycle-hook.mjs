@@ -85,7 +85,7 @@ export async function cleanupSessionJobs(cwd, sessionId, dependencies = {}) {
       const ownershipCaptureFailed = job.ownershipCaptureFailed === true;
       const outcome = await terminate(job.pid ?? Number.NaN, {
         expectedRootIdentity,
-        ownershipSnapshot: null,
+        ownershipSnapshot: job.ownershipSnapshot ?? null,
         requireVerifiedOwnership: ownershipCaptureFailed,
         priorCleanupDegraded: job.cleanupOutcome?.degraded === true
       });

@@ -21,7 +21,7 @@ import { isBrokerRequestAllowedDuringShutdown } from "../plugins/codex/scripts/a
 import { acquireBrokerRegistryLock, loadBrokerChildren, loadBrokerRegistration, publishBrokerChild, publishRegisteredBroker, registerBrokerOwner, releaseBrokerOwner, releaseBrokerRegistryLock, SESSION_OWNER_IDENTITY_ENV, SESSION_OWNER_PID_ENV } from "../plugins/codex/scripts/lib/broker-ownership.mjs";
 import { acquireBrokerLaunchLock, activateBrokerProcess, brokerLaunchLockPort, clearBrokerSession, ensureBrokerSession, loadBrokerSession, loadReusableBrokerSession, saveBrokerSession, sendBrokerShutdown, teardownBrokerSession, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
-import { captureProcessOwnership, getProcessIdentity, hasLiveProcessIdentity, terminateProcessGroup, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+import { captureProcessOwnership, getProcessIdentity, getWindowsProcessIdentity, hasLiveProcessIdentity, terminateProcessGroup, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
 import { hasCancelFlag, listJobs, loadState, resolveStateDir, resolveStateFile, saveState, upsertJob, writeCancelFlag, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { ROOT, SCRIPT, STOP_HOOK, SESSION_HOOK, BROKER_SCRIPT, SELF_EXPIRING_KEEPALIVE, selfExpiringKeepaliveCode, runtimePluginDataDir, makeTempDir, withBrokerOwner, waitFor, installSlowRejectFakeCodex, installInitializeErrorFakeCodex, instrumentSlowFakeTurnState, cleanupRuntimeBrokerSessions } from "./runtime-helpers.mjs";
@@ -1630,7 +1630,11 @@ test("task worker persists its own process identity and cancel verifies cleanup"
 
   assert.equal(runningJob.pid, worker.pid);
   assert.equal(runningJob.processIdentity, liveIdentity);
-  assert.equal(Object.hasOwn(runningJob, "ownershipSnapshot"), false);
+  // Alongside a successful identity capture, the worker now persists an
+  // ownership snapshot so cancel can verify the whole tree, not just the
+  // root PID.
+  assert.equal(runningJob.ownershipSnapshot?.rootIdentity, liveIdentity);
+  assert.equal(runningJob.ownershipSnapshot?.rootPid, worker.pid);
   assert.equal(Object.hasOwn(runningJob, "ownershipCaptureFailed"), false);
 
   await handleCancel([job.id, "--cwd", workspace, "--json"], {
@@ -1665,6 +1669,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
   });
   sleeper.unref();
   const ownershipSnapshot = captureProcessOwnership(sleeper.pid, { cwd: workspace });
+  const sleeperIdentity = ownershipSnapshot?.rootIdentity ?? (process.platform === "win32" ? getWindowsProcessIdentity(sleeper.pid) : null);
 
   t.after(() => {
     try {
@@ -1689,7 +1694,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
         status: "running",
         title: "Codex Task",
         pid: sleeper.pid,
-        processIdentity: ownershipSnapshot?.rootIdentity ?? null,
+        processIdentity: sleeperIdentity,
         ownershipSnapshot,
         logFile
       },
@@ -1712,7 +1717,7 @@ test("cancel stops an active background job and marks it cancelled", async (t) =
             jobClass: "task",
             summary: "Investigate flaky test",
             pid: sleeper.pid,
-            processIdentity: ownershipSnapshot?.rootIdentity ?? null,
+            processIdentity: sleeperIdentity,
             ownershipSnapshot,
             logFile,
             createdAt: "2026-03-18T15:30:00.000Z",
@@ -2391,13 +2396,14 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   });
   sleeper.unref();
   const ownershipSnapshot = captureProcessOwnership(sleeper.pid, { cwd: repo });
+  const sleeperIdentity = ownershipSnapshot?.rootIdentity ?? (process.platform === "win32" ? getWindowsProcessIdentity(sleeper.pid) : null);
   fs.writeFileSync(
     runningJobFile,
     JSON.stringify(
       {
         id: "review-running",
         pid: sleeper.pid,
-        processIdentity: ownershipSnapshot?.rootIdentity ?? null,
+        processIdentity: sleeperIdentity,
         ownershipSnapshot
       },
       null,
@@ -2440,7 +2446,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
             title: "Codex Review",
             sessionId: "sess-current",
             pid: sleeper.pid,
-            processIdentity: ownershipSnapshot?.rootIdentity ?? null,
+            processIdentity: sleeperIdentity,
             ownershipSnapshot,
             logFile: runningLog,
             createdAt: "2026-03-18T15:32:00.000Z",

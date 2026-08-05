@@ -101,6 +101,7 @@ test("terminateProcessTree uses taskkill on Windows and verifies with tasklist",
   const calls = [];
   const outcome = await terminateProcessTree(1234, {
     platform: "win32",
+    ownerHoldsLiveHandle: true,
     runCommandImpl(command, args) {
       calls.push({ command, args });
       if (command === "taskkill") {
@@ -143,6 +144,7 @@ test("terminateProcessTree refuses to verify a Windows process that survives tas
   const warnings = [];
   const outcome = await terminateProcessTree(1234, {
     platform: "win32",
+    ownerHoldsLiveHandle: true,
     runCommandImpl(command, args) {
       if (command === "taskkill") {
         return {
@@ -188,6 +190,7 @@ test("terminateProcessTree leaves a successful Windows taskkill unverified when 
   const warnings = [];
   const outcome = await terminateProcessTree(1234, {
     platform: "win32",
+    ownerHoldsLiveHandle: true,
     runCommandImpl(command, args) {
       if (command === "taskkill") {
         return {
@@ -252,6 +255,7 @@ test("getLiveProcessPids ignores a survivor PID reused by a different process", 
 test("terminateProcessTree treats missing Windows processes as already stopped", async () => {
   const outcome = await terminateProcessTree(1234, {
     platform: "win32",
+    ownerHoldsLiveHandle: true,
     runCommandImpl(command, args) {
       return {
         command,

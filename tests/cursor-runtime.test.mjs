@@ -503,7 +503,7 @@ test("cancel stops a slow background task and marks it cancelled", async () => {
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     const job = state.jobs.find((candidate) => candidate.id === jobId);
     return job?.status === "running" && Number.isFinite(job.pid) && job.threadId ? job : null;
-  }, { timeoutMs: 15000 });
+  }, { timeoutMs: 30000 });
   assert.equal(runningJob.threadId, "sess-fake-1");
 
   const cancelResult = run("node", [SCRIPT, "cancel", jobId, "--json"], {

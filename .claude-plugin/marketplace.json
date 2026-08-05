@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Delegate work from Claude Code to other AI coding agents: Codex (community fork with Windows fixes) and Cursor.",
-    "version": "1.0.6+fork.2"
+    "version": "1.0.6+fork.3"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6+fork.2",
+      "version": "1.0.6+fork.3",
       "author": {
         "name": "zebbern"
       },

@@ -566,6 +566,103 @@ function degradedDirectChildKill(pid, options, killImpl, reason) {
   });
 }
 
+const WINDOWS_IDENTITY_MARKER = "@win32:";
+
+export function probeWindowsProcessIdentity(pid, options = {}) {
+  if (!Number.isFinite(pid)) {
+    return { status: "absent", identity: null };
+  }
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  // CreationDate.ToFileTimeUtc() is a stable integer for the process start
+  // time; (pid, start time) uniquely identifies a Windows process the same
+  // way (pid, lstart) does on Unix, so a reused PID never matches. The probe
+  // distinguishes CONFIRMED absence (the query ran and found nothing) from
+  // probe failure — the two must never be conflated, or a transient
+  // PowerShell error would read as "the process is dead".
+  const result = runCommandImpl(
+    "powershell",
+    [
+      "-NoProfile",
+      "-Command",
+      `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}'; if ($p) { $p.CreationDate.ToFileTimeUtc() } else { 'ABSENT' }`
+    ],
+    { cwd: options.cwd, env: options.env, shell: false }
+  );
+  if (result.error || result.status !== 0) {
+    return { status: "unavailable", identity: null };
+  }
+  const output = result.stdout.trim();
+  if (output === "ABSENT") {
+    return { status: "absent", identity: null };
+  }
+  if (/^\d+$/.test(output)) {
+    return { status: "ok", identity: `${Math.trunc(pid)}${WINDOWS_IDENTITY_MARKER}${output}` };
+  }
+  return { status: "unavailable", identity: null };
+}
+
+export function getWindowsProcessIdentity(pid, options = {}) {
+  const probe = probeWindowsProcessIdentity(pid, options);
+  return probe.status === "ok" ? probe.identity : null;
+}
+
+export function isWindowsProcessIdentity(identity) {
+  return typeof identity === "string" && identity.includes(WINDOWS_IDENTITY_MARKER);
+}
+
+// 5 seconds in 100ns FILETIME units: the slack allowed when comparing an
+// approximate self-computed start time against the kernel's exact value.
+const WINDOWS_IDENTITY_TOLERANCE = 5n * 10_000_000n;
+
+export function getOwnWindowsProcessIdentity() {
+  if (process.platform !== "win32") {
+    return null;
+  }
+  // The current process knows its own start moment without any shell call:
+  // Date.now() minus uptime, converted to FILETIME. It is approximate (a few
+  // ms of drift against the kernel's CreationDate), so it carries a "~"
+  // marker and matchesWindowsIdentity compares it with tolerance.
+  const startMs = Date.now() - process.uptime() * 1000;
+  const fileTime = (BigInt(Math.round(startMs)) + 11644473600000n) * 10000n;
+  return `${process.pid}${WINDOWS_IDENTITY_MARKER}~${fileTime}`;
+}
+
+function parseWindowsIdentity(identity) {
+  if (typeof identity !== "string") {
+    return null;
+  }
+  const index = identity.indexOf(WINDOWS_IDENTITY_MARKER);
+  if (index === -1) {
+    return null;
+  }
+  const pid = Number(identity.slice(0, index));
+  let value = identity.slice(index + WINDOWS_IDENTITY_MARKER.length);
+  const approximate = value.startsWith("~");
+  if (approximate) {
+    value = value.slice(1);
+  }
+  if (!Number.isFinite(pid) || !/^\d+$/.test(value)) {
+    return null;
+  }
+  return { pid, fileTime: BigInt(value), approximate };
+}
+
+export function matchesWindowsIdentity(expected, actual) {
+  if (typeof expected === "string" && expected === actual) {
+    return true;
+  }
+  const left = parseWindowsIdentity(expected);
+  const right = parseWindowsIdentity(actual);
+  if (!left || !right || left.pid !== right.pid) {
+    return false;
+  }
+  if (!left.approximate && !right.approximate) {
+    return left.fileTime === right.fileTime;
+  }
+  const delta = left.fileTime > right.fileTime ? left.fileTime - right.fileTime : right.fileTime - left.fileTime;
+  return delta <= WINDOWS_IDENTITY_TOLERANCE;
+}
+
 export async function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     const ownershipSnapshot = options.ownershipSnapshot ?? null;
@@ -593,6 +690,43 @@ export async function terminateProcessTree(pid, options = {}) {
   const ownershipEstablished = Boolean(ownershipSnapshot || expectedRootIdentity || ownershipCaptureFailed);
 
   if (platform === "win32") {
+    // Ownership gates run BEFORE taskkill: a raw PID is never proof — the
+    // recorded process may have exited and the PID been reused by an
+    // unrelated process. Matching Unix semantics, a bare PID without a
+    // provable win32 identity is never killed (fail closed) unless the
+    // caller holds a live handle to the process it captured.
+    if (isWindowsProcessIdentity(expectedRootIdentity)) {
+      // PowerShell can be slow or transiently fail under load; retry before
+      // concluding the probe is unavailable. Only a run of failures refuses.
+      const probeImpl = options.probeWindowsProcessIdentityImpl ?? probeWindowsProcessIdentity;
+      const probeAttempts = options.probeAttempts ?? 3;
+      let probe = probeImpl(pid, options);
+      for (let attempt = 1; attempt < probeAttempts && probe.status === "unavailable"; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, options.probeRetryMs ?? 400));
+        probe = probeImpl(pid, options);
+      }
+      if (probe.status === "unavailable") {
+        // Probe failure is not evidence of death: refuse to conclude
+        // anything, and refuse to kill what cannot be verified.
+        return normalizeProcessCleanupOutcome({ attempted: false, delivered: false, verified: false, degraded: true, method: null });
+      }
+      if (probe.status === "absent" || !matchesWindowsIdentity(expectedRootIdentity, probe.identity)) {
+        // Confirmed gone, or the PID was reused by an unrelated process:
+        // nothing of ours is left to kill and the cancel is safe to finalize.
+        return normalizeProcessCleanupOutcome({ attempted: false, delivered: false, verified: true, method: "identity-check" });
+      }
+    } else if (options.ownerHoldsLiveHandle !== true) {
+      // A live ChildProcess handle pins the PID against reuse, so a caller
+      // that spawned the process may kill it without an identity. Anyone
+      // else must prove ownership first.
+      return normalizeProcessCleanupOutcome({
+        attempted: false,
+        delivered: false,
+        verified: false,
+        degraded: true,
+        method: null
+      });
+    }
     // shell: false — under Git Bash (SHELL set), MSYS argument conversion
     // rewrites /PID into a filesystem path (e.g. "C:/Program Files/Git/PID"),
     // making taskkill fail with "Invalid argument".

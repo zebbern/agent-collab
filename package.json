@@ -1,6 +1,6 @@
 {
   "name": "agent-collab",
-  "version": "1.0.6+fork.2",
+  "version": "1.0.6+fork.3",
   "private": true,
   "type": "module",
   "description": "Community fork of the OpenAI Codex plugin for Claude Code.",

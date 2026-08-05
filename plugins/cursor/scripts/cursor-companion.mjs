@@ -23,7 +23,9 @@ import {
   binaryAvailable,
   captureProcessOwnership,
   getProcessIdentity,
-  getWindowsProcessIdentity,
+  getOwnWindowsProcessIdentity,
+  matchesWindowsIdentity,
+  probeWindowsProcessIdentity,
   isWindowsProcessIdentity,
   terminateProcessTree
 } from "./lib/process.mjs";
@@ -711,19 +713,23 @@ export async function handleTaskWorker(argv, dependencies = {}) {
     const processIdentity =
       (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid) ??
       (process.platform === "win32"
-        ? (dependencies.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity)(process.pid)
+        ? (dependencies.getWindowsProcessIdentityImpl ?? getOwnWindowsProcessIdentity)(process.pid)
         : null);
     workerOwnership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
   } catch {
     workerOwnership = { ownershipCaptureFailed: true };
   }
-  try {
-    const ownershipSnapshot = (dependencies.captureProcessOwnershipImpl ?? captureProcessOwnership)(process.pid);
-    if (ownershipSnapshot) {
-      workerOwnership = { ...workerOwnership, ownershipSnapshot };
+  if (workerOwnership.processIdentity) {
+    // Snapshot only alongside a successful identity capture: a failed capture
+    // must leave no partial ownership data behind.
+    try {
+      const ownershipSnapshot = (dependencies.captureProcessOwnershipImpl ?? captureProcessOwnership)(process.pid);
+      if (ownershipSnapshot) {
+        workerOwnership = { ...workerOwnership, ownershipSnapshot };
+      }
+    } catch {
+      // Snapshot capture is best-effort; identity above still gates cancel.
     }
-  } catch {
-    // Snapshot capture is best-effort; identity above still gates cancel.
   }
 
   const request = storedJob.request;
@@ -917,13 +923,14 @@ export async function handleCancel(argv, dependencies = {}) {
 
   if (cleanupOutcome?.verified !== true && isWindowsProcessIdentity(expectedRootIdentity)) {
     // The worker exits by itself once its agent is gone and the cancel flag is
-    // set; give it a short window and verify by identity, not by liveness of
-    // whatever may have reused the PID.
-    const identityImpl = dependencies.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity;
+    // set; give it a short window and verify by identity. Only CONFIRMED
+    // evidence flips the verdict: a probe failure keeps the cancel unverified
+    // rather than reading as "the worker died".
+    const probeImpl = dependencies.probeWindowsProcessIdentityImpl ?? probeWindowsProcessIdentity;
     const deadline = Date.now() + (dependencies.workerExitWaitMs ?? 5000);
     for (;;) {
-      const currentIdentity = identityImpl(record.pid);
-      if (currentIdentity === null || currentIdentity !== expectedRootIdentity) {
+      const probe = probeImpl(record.pid);
+      if (probe.status === "absent" || (probe.status === "ok" && !matchesWindowsIdentity(expectedRootIdentity, probe.identity))) {
         cleanupOutcome = { ...(cleanupOutcome ?? {}), attempted: true, delivered: true, verified: true, method: "identity-poll" };
         break;
       }

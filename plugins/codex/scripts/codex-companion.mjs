@@ -24,7 +24,16 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, getProcessIdentity, terminateProcessTree } from "./lib/process.mjs";
+import {
+  binaryAvailable,
+  captureProcessOwnership,
+  getProcessIdentity,
+  getOwnWindowsProcessIdentity,
+  matchesWindowsIdentity,
+  probeWindowsProcessIdentity,
+  isWindowsProcessIdentity,
+  terminateProcessTree
+} from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   generateJobId,
@@ -937,10 +946,29 @@ export async function handleTaskWorker(argv, dependencies = {}) {
   } = storedJob;
   let workerOwnership;
   try {
-    const processIdentity = (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid);
+    // Unix start-time identity where available; on win32 fall back to the
+    // (pid, CreationDate) identity so cancel can prove the PID still belongs
+    // to this worker before any taskkill.
+    const processIdentity =
+      (dependencies.getProcessIdentityImpl ?? getProcessIdentity)(process.pid) ??
+      (process.platform === "win32"
+        ? (dependencies.getWindowsProcessIdentityImpl ?? getOwnWindowsProcessIdentity)(process.pid)
+        : null);
     workerOwnership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
   } catch {
     workerOwnership = { ownershipCaptureFailed: true };
+  }
+  if (workerOwnership.processIdentity) {
+    // Snapshot only alongside a successful identity capture: a failed capture
+    // must leave no partial ownership data behind.
+    try {
+      const ownershipSnapshot = (dependencies.captureProcessOwnershipImpl ?? captureProcessOwnership)(process.pid);
+      if (ownershipSnapshot) {
+        workerOwnership = { ...workerOwnership, ownershipSnapshot };
+      }
+    } catch {
+      // Snapshot capture is best-effort; identity above still gates cancel.
+    }
   }
 
   const request = storedJob.request;
@@ -1132,12 +1160,43 @@ export async function handleCancel(argv, dependencies = {}) {
 
   const expectedRootIdentity = existing.processIdentity ?? null;
   const ownershipCaptureFailed = existing.ownershipCaptureFailed === true;
-  const cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
-    expectedRootIdentity,
-    ownershipSnapshot: null,
-    requireVerifiedOwnership: ownershipCaptureFailed,
-    priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
-  });
+  writeCancelFlag(workspaceRoot, job.id);
+  let cleanupOutcome = null;
+  try {
+    cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
+      expectedRootIdentity,
+      ownershipSnapshot: existing.ownershipSnapshot ?? null,
+      requireVerifiedOwnership: ownershipCaptureFailed,
+      priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
+    });
+  } catch (error) {
+    // A partially resistant tree is not fatal: sandboxed codex.exe children
+    // can reject taskkill ("operation is not supported") yet still exit on
+    // their own once the worker's pipes close. The identity poll below
+    // decides whether the worker actually died.
+    appendLogLine(record.logFile, `Process tree termination for ${job.id} reported: ${error.message}`);
+  }
+
+  if (cleanupOutcome?.verified !== true && isWindowsProcessIdentity(expectedRootIdentity)) {
+    // The worker exits by itself once the cancel flag is set and its
+    // children unwind; give it a short window and verify by identity. Only
+    // CONFIRMED evidence flips the verdict: a probe failure keeps the cancel
+    // unverified rather than reading as "the worker died".
+    const probeImpl = dependencies.probeWindowsProcessIdentityImpl ?? probeWindowsProcessIdentity;
+    const deadline = Date.now() + (dependencies.workerExitWaitMs ?? 5000);
+    for (;;) {
+      const probe = probeImpl(record.pid);
+      if (probe.status === "absent" || (probe.status === "ok" && !matchesWindowsIdentity(expectedRootIdentity, probe.identity))) {
+        cleanupOutcome = { ...(cleanupOutcome ?? {}), attempted: true, delivered: true, verified: true, method: "identity-poll" };
+        break;
+      }
+      if (Date.now() > deadline) {
+        break;
+      }
+      await sleep(250);
+    }
+  }
+
   if (cleanupOutcome?.verified !== true) {
     const failureMessage =
       ownershipCaptureFailed && !expectedRootIdentity

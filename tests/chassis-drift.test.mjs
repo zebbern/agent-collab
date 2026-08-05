@@ -31,7 +31,7 @@ const PINNED_DIVERGENCE = new Map([
   ["fs.mjs", "1edeb160e32f4964"],
   ["prompts.mjs", "e3b0c44298fc1c14"],
   ["workspace.mjs", "e3b0c44298fc1c14"],
-  ["process.mjs", "dc00230fc6896e87"],
+  ["process.mjs", "e3b0c44298fc1c14"],
   ["git.mjs", "e3b0c44298fc1c14"],
   ["state.mjs", "225822284a336ad7"],
   ["job-control.mjs", "ec57029b7211f664"],

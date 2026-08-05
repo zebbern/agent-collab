@@ -758,3 +758,47 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
 });
+
+test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+
+  // A live process the plugin does NOT own, standing in for a reused PID.
+  const bystander = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+    stdio: "ignore"
+  });
+  t.after(() => {
+    try {
+      bystander.kill();
+    } catch {
+      // Already gone.
+    }
+  });
+
+  // A legacy job record whose ownership capture failed: raw pid, no identity.
+  upsertJob(repo, { id: "task-stale", status: "running", jobClass: "task", pid: bystander.pid });
+  writeJobFile(repo, "task-stale", {
+    id: "task-stale",
+    status: "running",
+    pid: bystander.pid,
+    ownershipCaptureFailed: true,
+    request: { cwd: repo, prompt: "stale" }
+  });
+
+  const cancelResult = run("node", [SCRIPT, "cancel", "task-stale", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  // The cancel must fail closed: non-zero exit, ownership message, and the
+  // bystander process must still be alive.
+  assert.notEqual(cancelResult.status, 0);
+  assert.match(`${cancelResult.stderr}\n${cancelResult.stdout}`, /could not be verified as owned|Unable to verify cleanup/);
+  assert.doesNotThrow(() => process.kill(bystander.pid, 0));
+
+  const staleJob = listJobs(repo).find((job) => job.id === "task-stale");
+  assert.notEqual(staleJob.status, "cancelled");
+  assert.equal(staleJob.phase, "cleanup-pending");
+});
