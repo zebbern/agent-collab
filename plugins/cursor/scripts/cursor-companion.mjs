@@ -374,6 +374,8 @@ async function executeTaskRun(request) {
     touchedFiles: result.touchedFiles,
     fileChanges: boundTelemetryItems(result.fileChanges),
     commandExecutions: boundTelemetryItems(result.commandExecutions),
+    reasoningSummary: result.reasoningSummary,
+    tokenUsage: result.turn?.tokenUsage ?? null,
     durationMs: result.durationMs ?? null,
     transport: result.transport ?? null,
     transportReason: result.transportReason ?? null,

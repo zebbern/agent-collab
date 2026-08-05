@@ -577,6 +577,17 @@ function applyStreamEvent(state, event, onProgress) {
     case "tool_call":
       recordToolCall(state, event, onProgress);
       break;
+    case "thinking":
+      // Undocumented but real (cursor-agent 2026.07.23): reasoning streams as
+      // {"type":"thinking","subtype":"delta","text":...} runs closed by a
+      // "completed" event. Collect each run as one reasoning section.
+      if (event.subtype === "delta" && typeof event.text === "string") {
+        state.thinkingBuffer += event.text;
+      } else if (event.subtype === "completed" && state.thinkingBuffer.trim()) {
+        state.reasoningSummary.push(state.thinkingBuffer.replace(/\s+/g, " ").trim());
+        state.thinkingBuffer = "";
+      }
+      break;
     case "result":
       state.result = event;
       if (event.is_error) {
@@ -637,6 +648,9 @@ export async function runCursorTurn(cwd, options = {}) {
     agentArgs.push("--resume", String(options.resumeChatId));
   }
   agentArgs.push("--workspace", workspacePath);
+  // Headless runs die on the interactive workspace-trust prompt without this
+  // (verified against cursor-agent 2026.07.23).
+  agentArgs.push("--trust");
   if (options.write) {
     // Write mode: skip per-command confirmation. Read mode omits --force and
     // keeps the default sandbox.
@@ -664,6 +678,8 @@ export async function runCursorTurn(cwd, options = {}) {
       sessionId: options.resumeChatId ?? null,
       resolvedModel: null,
       assistantText: "",
+      thinkingBuffer: "",
+      reasoningSummary: [],
       fileChanges: [],
       commandExecutions: [],
       result: null,
@@ -727,12 +743,31 @@ export async function runCursorTurn(cwd, options = {}) {
         });
       }
 
+      // The terminal result event carries token usage
+      // ({inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens});
+      // normalize to the snake_case field names the job-control signals read.
+      const usage = resultEvent?.usage;
+      const tokenUsage =
+        usage && typeof usage === "object"
+          ? {
+              input_tokens: usage.inputTokens ?? null,
+              output_tokens: usage.outputTokens ?? null,
+              cache_read_tokens: usage.cacheReadTokens ?? null,
+              cache_write_tokens: usage.cacheWriteTokens ?? null,
+              total_tokens:
+                Number.isFinite(usage.inputTokens) && Number.isFinite(usage.outputTokens)
+                  ? usage.inputTokens + usage.outputTokens
+                  : null
+            }
+          : null;
+
       resolve({
         status: isError ? 1 : 0,
         threadId: state.sessionId,
         turnId: null,
         finalMessage,
-        reasoningSummary: [],
+        reasoningSummary: state.reasoningSummary,
+        turn: tokenUsage ? { tokenUsage } : null,
         fileChanges: state.fileChanges,
         touchedFiles: collectTouchedFiles(state.fileChanges),
         commandExecutions: state.commandExecutions,
