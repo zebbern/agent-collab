@@ -45,9 +45,12 @@ npm run build                           # regenerates app-server types + tsc che
   of the shared lib modules. Any chassis change must land in BOTH
   `plugins/codex/scripts/lib/` and `plugins/cursor/scripts/lib/`, or
   `tests/chassis-drift.test.mjs` fails. Intentional divergence requires
-  updating that file's pin table in the same commit. `process.mjs` is
-  byte-identical between plugins — keep it that way (edit one, copy to the
-  other).
+  updating that file's pin table in the same commit. After editing a chassis
+  module, run `npm run sync-chassis` (codex → cursor; `-- --from cursor` to
+  reverse): it copies the byte-identical and literal-swap modules, refuses to
+  touch the genuinely-divergent ones (`fs.mjs`, `job-control.mjs`,
+  `render.mjs` — mirror those by hand), and runs the drift guard. The drift
+  test remains an independent tripwire; do not wire the sync into it.
 - **Docs are contract-tested.** `tests/commands.test.mjs` pins exact strings in
   README.md, command files, and skills; `tests/cursor-skills.test.mjs` pins the
   cursor trio. Editing docs can break tests — run them.

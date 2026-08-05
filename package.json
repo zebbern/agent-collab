@@ -13,6 +13,7 @@
     "check-version": "node scripts/bump-version.mjs --check",
     "prebuild": "node -e \"fs.mkdirSync('plugins/codex/.generated/app-server-types', { recursive: true })\" && codex app-server generate-ts --out plugins/codex/.generated/app-server-types",
     "build": "tsc -p tsconfig.app-server.json",
+    "sync-chassis": "node scripts/sync-chassis.mjs",
     "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {
