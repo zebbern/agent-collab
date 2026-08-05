@@ -546,7 +546,8 @@ async function executeTaskRun(request) {
     tokenUsage: result.turn?.tokenUsage ?? null,
     transport: result.transport ?? null,
     transportReason: result.transportReason ?? null,
-    model: result.model ?? null
+    model: result.model ?? null,
+    effort: result.effort ?? null
   };
 
   return {

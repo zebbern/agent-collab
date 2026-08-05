@@ -2459,6 +2459,7 @@ test("task run warns once, logs once, and records the direct transport when the 
   assert.equal(storedJob.result.transport, "direct");
   assert.equal(storedJob.result.transportReason, expectedReason);
   assert.equal(storedJob.result.model, null);
+  assert.equal(storedJob.result.effort, null);
 
   const logLines = fs.readFileSync(storedJob.logFile, "utf8").split(/\r?\n/).filter((line) => line.includes("shared Codex runtime unavailable"));
   assert.equal(logLines.length, 1);

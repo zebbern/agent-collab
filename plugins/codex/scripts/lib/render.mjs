@@ -152,7 +152,7 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Transport: ${transportLabel}${job.transportReason ? ` (${job.transportReason})` : ""}`);
   }
   if (job.modelRecorded) {
-    lines.push(`  Model: ${job.model ?? "default (Codex config)"}`);
+    lines.push(`  Model: ${job.model ?? "default (Codex config)"}${job.effort ? ` (effort: ${job.effort})` : ""}`);
   }
   if (options.showElapsed && job.elapsed) {
     lines.push(`  Elapsed: ${job.elapsed}`);
@@ -457,6 +457,12 @@ function appendStoredResultTail(output, job, storedJob, options = {}) {
   const lines = [];
   if (options.includeExtras) {
     appendStoredResultExtras(lines, storedJob?.result);
+  }
+  const resultRecord = storedJob?.result;
+  if (resultRecord && typeof resultRecord === "object" && Object.hasOwn(resultRecord, "model")) {
+    const modelLabel = typeof resultRecord.model === "string" && resultRecord.model ? resultRecord.model : "default (Codex config)";
+    const effortSuffix = typeof resultRecord.effort === "string" && resultRecord.effort ? ` (effort: ${resultRecord.effort})` : "";
+    lines.push("", `Model: ${modelLabel}${effortSuffix}`);
   }
   if (threadId && !output.includes(`Codex session ID: ${threadId}`)) {
     pushSessionFooter(lines, threadId);

@@ -1205,7 +1205,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       commandExecutions: turnState.commandExecutions,
       transport: client.transport,
       transportReason: client.transportFallback ?? null,
-      model: options.model ?? null
+      model: options.model ?? null,
+      effort: options.effort ?? null
     };
   }, {
     onDegraded: (_reason, message) => {

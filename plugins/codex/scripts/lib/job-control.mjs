@@ -357,7 +357,8 @@ function readJobModel(storedResult) {
     return {};
   }
   const model = typeof storedResult.model === "string" && storedResult.model ? storedResult.model : null;
-  return { model, modelRecorded: true };
+  const effort = typeof storedResult.effort === "string" && storedResult.effort ? storedResult.effort : null;
+  return effort ? { model, modelRecorded: true, effort } : { model, modelRecorded: true };
 }
 
 export function enrichJob(job, options = {}) {

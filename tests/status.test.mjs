@@ -200,10 +200,11 @@ test("enrichJob surfaces the stored transport only when the result payload carri
 test("enrichJob surfaces the stored model only when the result payload carries it", () => {
   const explicit = enrichJob(
     { id: "task-model", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },
-    { storedResult: { model: "gpt-5.4-codex" } }
+    { storedResult: { model: "gpt-5.4-codex", effort: "xhigh" } }
   );
   assert.equal(explicit.model, "gpt-5.4-codex");
   assert.equal(explicit.modelRecorded, true);
+  assert.equal(explicit.effort, "xhigh");
 
   const configDefault = enrichJob(
     { id: "task-model-default", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },
@@ -211,6 +212,7 @@ test("enrichJob surfaces the stored model only when the result payload carries i
   );
   assert.equal(configDefault.model, null);
   assert.equal(configDefault.modelRecorded, true);
+  assert.equal(Object.hasOwn(configDefault, "effort"), false);
 
   const legacy = enrichJob(
     { id: "task-model-legacy", status: "completed", createdAt: "2026-03-24T20:00:00.000Z" },

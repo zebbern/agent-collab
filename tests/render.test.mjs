@@ -128,6 +128,36 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
   assert.match(output, /Next: \/codex:status review-123 for job details, or \/codex:review --wait to review the changes\./);
 });
 
+test("renderStoredJobResult shows the model line only when the stored result carries it", () => {
+  const explicit = renderStoredJobResult(
+    { id: "task-90", status: "completed", title: "Codex Task", jobClass: "task", threadId: "thr_m1" },
+    {
+      threadId: "thr_m1",
+      result: { rawOutput: "Task done.", model: "gpt-5.4-codex", effort: "high" }
+    }
+  );
+  assert.match(explicit, /Model: gpt-5\.4-codex \(effort: high\)/);
+
+  const configDefault = renderStoredJobResult(
+    { id: "task-91", status: "completed", title: "Codex Task", jobClass: "task", threadId: "thr_m2" },
+    {
+      threadId: "thr_m2",
+      result: { rawOutput: "Task done.", model: null, effort: null }
+    }
+  );
+  assert.match(configDefault, /Model: default \(Codex config\)/);
+  assert.doesNotMatch(configDefault, /effort:/);
+
+  const legacy = renderStoredJobResult(
+    { id: "task-92", status: "completed", title: "Codex Task", jobClass: "task", threadId: "thr_m3" },
+    {
+      threadId: "thr_m3",
+      result: { rawOutput: "Task done." }
+    }
+  );
+  assert.doesNotMatch(legacy, /Model:/);
+});
+
 test("renderStoredJobResult shows stored files, reasoning, and follow-up hints for task jobs", () => {
   const output = renderStoredJobResult(
     {
@@ -283,6 +313,18 @@ test("renderJobStatusReport shows the model line only when the job record carrie
     modelRecorded: true
   });
   assert.match(configDefault, /Model: default \(Codex config\)/);
+  assert.doesNotMatch(configDefault, /effort:/);
+
+  const withEffort = renderJobStatusReport({
+    id: "task-85",
+    status: "completed",
+    kindLabel: "rescue",
+    title: "Codex Task",
+    model: "gpt-5.3-codex-spark",
+    modelRecorded: true,
+    effort: "high"
+  });
+  assert.match(withEffort, /Model: gpt-5\.3-codex-spark \(effort: high\)/);
 
   const legacy = renderJobStatusReport({
     id: "task-84",
