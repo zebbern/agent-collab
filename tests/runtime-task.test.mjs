@@ -731,7 +731,7 @@ test("task --background enqueues a detached worker and exposes per-job status", 
 
   const waitedStatus = run(
     "node",
-    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "15000", "--json"],
+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "45000", "--json"],
     {
       cwd: repo,
       env: buildEnv(binDir)
@@ -741,7 +741,9 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
   const waitedPayload = JSON.parse(waitedStatus.stdout);
   assert.equal(waitedPayload.job.id, launchPayload.jobId);
-  assert.equal(waitedPayload.job.status, "completed");
+  // The job payload rides in the failure message so a load-starved flake
+  // self-documents instead of printing only 'queued' !== 'completed'.
+  assert.equal(waitedPayload.job.status, "completed", JSON.stringify(waitedPayload.job));
 
   const resultPayload = await waitFor(() => {
     const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {

@@ -47,7 +47,13 @@ export function brokerLaunchLockPort(cwd) {
 
 function tryListenForBrokerLaunch(port, greeting) {
   return new Promise((resolve, reject) => {
-    const server = net.createServer((socket) => socket.end(`${greeting}\n`));
+    const server = net.createServer((socket) => {
+      // Probing clients hard-destroy the connection once they have read the
+      // greeting, which can surface as ECONNRESET here; without a handler
+      // that is an uncaughtException that kills the lock holder mid-launch.
+      socket.on("error", () => {});
+      socket.end(`${greeting}\n`);
+    });
     const onError = (error) => {
       if (error?.code === "EADDRINUSE") {
         resolve(null);

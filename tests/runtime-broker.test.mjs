@@ -700,13 +700,38 @@ test("existing broker reuse refuses an owner that dies at the publication bounda
 });
 
 test("deterministic broker launch lock never splits across fallback resources", async (t) => {
-  const repo = makeTempDir();
-  const port = brokerLaunchLockPort(repo);
-  const foreignServer = net.createServer((socket) => socket.end("foreign-service\n"));
-  await new Promise((resolve, reject) => {
-    foreignServer.once("error", reject);
-    foreignServer.listen({ host: "127.0.0.1", port, exclusive: true }, resolve);
-  });
+  // The lock port is hash-derived from the workspace path, and Windows
+  // reserves whole port ranges (Hyper-V/WSL exclusions) where listening
+  // fails EACCES. Sample fresh workspaces until one lands on a bindable
+  // port — production handles excluded ports via the direct-mode fallback
+  // pinned by the next test.
+  let repo = null;
+  let port = null;
+  let foreignServer = null;
+  for (let attempt = 0; attempt < 5 && foreignServer === null; attempt += 1) {
+    const candidateRepo = makeTempDir();
+    const candidatePort = brokerLaunchLockPort(candidateRepo);
+    const server = net.createServer((socket) => socket.end("foreign-service\n"));
+    const listening = await new Promise((resolve, reject) => {
+      server.once("error", (error) => {
+        if (error?.code === "EACCES") {
+          resolve(null);
+          return;
+        }
+        reject(error);
+      });
+      server.listen({ host: "127.0.0.1", port: candidatePort, exclusive: true }, () => resolve(server));
+    });
+    if (listening) {
+      repo = candidateRepo;
+      port = candidatePort;
+      foreignServer = server;
+    }
+  }
+  if (!foreignServer) {
+    t.skip("Every sampled launch-lock port is excluded by the OS on this host.");
+    return;
+  }
   t.after(async () => {
     if (foreignServer.listening) {
       await new Promise((resolve) => foreignServer.close(resolve));

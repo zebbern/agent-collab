@@ -106,7 +106,7 @@ test("companion help and --help document every subcommand and the real flags", (
     assert.match(result.stdout, /\badversarial-review .* \[focus text\]/);
     assert.match(result.stdout, /\btask .*--resume-last\|--resume\|--fresh/);
     assert.match(result.stdout, /\btask .*--model <model\|spark>/);
-    assert.match(result.stdout, /\btask .*--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
+    assert.match(result.stdout, /\btask .*--effort <none\|minimal\|low\|medium\|high\|xhigh\|max>/);
     assert.match(result.stdout, /\btask .*--prompt-file <path>/);
     assert.match(result.stdout, /\bstatus \[job-id\] \[--wait\] \[--timeout-ms <ms>\] \[--poll-interval-ms <ms>\] \[--all\] \[--json\]/);
     assert.match(result.stdout, /\bresult \[job-id\] \[--json\]/);
@@ -137,7 +137,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
   assert.match(rescue, /--model <model\|spark>/);
-  assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
+  assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max>/);
   assert.match(rescue, /task-resume-candidate --json/);
   assert.match(rescue, /AskUserQuestion/);
   assert.match(rescue, /Continue current Codex thread/);
@@ -183,7 +183,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /Map `spark` to `--model gpt-5\.3-codex-spark`/i);
   assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
   assert.match(runtimeSkill, /Strip it before calling `task`/i);
-  assert.match(runtimeSkill, /`--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/i);
+  assert.match(runtimeSkill, /`--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`/i);
   assert.match(runtimeSkill, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(runtimeSkill, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
   assert.match(readme, /`codex:codex-rescue` subagent/i);

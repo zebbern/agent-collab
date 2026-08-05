@@ -476,7 +476,7 @@ test("task --background enqueues a detached worker and result returns its output
 
   const waitedStatus = run(
     "node",
-    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "30000", "--json"],
+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "60000", "--json"],
     {
       cwd: repo,
       env: buildCursorEnv(binDir)
@@ -486,7 +486,9 @@ test("task --background enqueues a detached worker and result returns its output
   assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
   const waitedPayload = JSON.parse(waitedStatus.stdout);
   assert.equal(waitedPayload.job.id, launchPayload.jobId);
-  assert.equal(waitedPayload.job.status, "completed");
+  // The job payload rides in the failure message so a load-starved flake
+  // self-documents instead of printing only 'failed' !== 'completed'.
+  assert.equal(waitedPayload.job.status, "completed", JSON.stringify(waitedPayload.job));
 
   const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
     cwd: repo,
@@ -565,17 +567,24 @@ test("cancel stops an in-process review and survives a clobbered job file", asyn
   });
 
   const stateDir = resolveStateDir(repo);
+  // Gate on the precondition this test actually needs — ownership persisted —
+  // not on threadId. runTrackedJob captures ownership and writes the running
+  // record BEFORE executeReviewRun does its git context collection and spawns
+  // cursor-agent, so waiting for threadId would couple this test to that
+  // whole slow chain (a real flake source on loaded Windows CI). The
+  // ownership snapshot is taken before any git child is spawned, so
+  // cancelling this early cannot trip taskkill /T over transient descendants.
   const runningJob = await waitFor(() => {
     try {
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
       const job = state.jobs.find((candidate) => candidate.jobClass === "review");
-      return job?.status === "running" && Number.isFinite(job.pid) && job.threadId && job.processIdentity
+      return job?.status === "running" && Number.isFinite(job.pid) && job.processIdentity
         ? job
         : null;
     } catch {
       return null;
     }
-  }, { timeoutMs: 30000 });
+  }, { timeoutMs: 60000 });
 
   // In-process runs must persist the runner's ownership into BOTH stores.
   assert.match(runningJob.processIdentity, /@/);
@@ -640,7 +649,7 @@ test("cancel stops a slow background task and marks it cancelled", async () => {
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     const job = state.jobs.find((candidate) => candidate.id === jobId);
     return job?.status === "running" && Number.isFinite(job.pid) && job.threadId ? job : null;
-  }, { timeoutMs: 30000 });
+  }, { timeoutMs: 60000 });
   assert.equal(runningJob.threadId, "sess-fake-1");
 
   const cancelResult = run("node", [SCRIPT, "cancel", jobId, "--json"], {

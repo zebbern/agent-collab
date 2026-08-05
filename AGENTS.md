@@ -8,17 +8,26 @@ JSDoc types — no build step for runtime code, no dependencies beyond dev tools
 ## Commands
 
 ```bash
-npm test                                # full suite (~7.5 min locally on Windows)
+npm test                                # full suite (~2 min; caps file concurrency at 8)
 node --test tests/<file>.test.mjs       # one file
 node --test --test-name-pattern="..." tests/<file>.test.mjs   # one test
 npm run build                           # regenerates app-server types + tsc checkJs
 ```
 
 - Verify test results by **exit code**, never by grepping output.
-- `tests/runtime-*.test.mjs` and the cancel e2e tests spawn real processes and
-  are slow; prefer targeted patterns while iterating, but run the full suite
+- `tests/runtime-*.test.mjs` and the cancel e2e tests spawn real detached
+  processes; prefer targeted patterns while iterating, but run the full suite
   (or rely on CI) before claiming a semantics change is safe — "targeted" has
   missed pinned contracts before.
+- `npm test` runs `scripts/run-tests.mjs`, which caps file concurrency at
+  `min(cores, 8)`. The process-spawning e2e tests starve their detached
+  workers under unbounded parallelism on high-core machines (a 32-core box
+  would run 32 files at once), so a ceiling is required — but a hardcoded
+  `--test-concurrency=8` is an absolute value, not a max, and would *raise*
+  concurrency on a 2-core CI runner, oversubscribing it and blowing the state
+  lock's warn-and-proceed timeout (lost updates in the concurrency test). The
+  runner's `min(cores, 8)` caps high-core boxes without ever inflating
+  low-core ones. Run a single file directly with `node --test tests/<f>`.
 - Linux behavior is reproduced exactly by `docker run node:22` with the repo
   copied in; ubuntu CI will agree with it.
 
