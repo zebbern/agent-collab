@@ -43,14 +43,16 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add zebbern/codex-collaborate-plugin
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install codex@codex-collaborate-plugin
 ```
+
+(For the official OpenAI plugin instead, use `/plugin marketplace add openai/codex-plugin-cc`.)
 
 Reload plugins:
 
