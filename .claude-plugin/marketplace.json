@@ -1,10 +1,10 @@
 {
-  "name": "codex-collaborate-plugin",
+  "name": "multi-collaboration",
   "owner": {
     "name": "zebbern"
   },
   "metadata": {
-    "description": "Community fork of the OpenAI Codex plugin for Claude Code, with durability, Windows process-cleanup, and job-progress improvements.",
+    "description": "Delegate work from Claude Code to other AI coding agents: Codex (community fork with Windows fixes) and Cursor.",
     "version": "1.0.6+fork.2"
   },
   "plugins": [

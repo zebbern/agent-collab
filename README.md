@@ -1,4 +1,12 @@
-# Codex plugin for Claude Code (community fork)
+# multi-collaboration — delegate from Claude Code to other AI coding agents
+
+Two plugins in one marketplace: **codex** (a community fork of OpenAI's Codex
+plugin, detailed below) and **cursor** (`/cursor:review`, `/cursor:task`, … —
+drives Cursor's headless `cursor-agent` CLI with the same job tracking,
+progress-aware status, and model recording; see
+[plugins/cursor/CHANGELOG.md](plugins/cursor/CHANGELOG.md)).
+
+## Codex plugin (community fork)
 
 > **This is an unofficial fork.** It is not built, endorsed, or supported by OpenAI.
 > It is a modified version of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)
@@ -43,13 +51,19 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add zebbern/codex-collaborate-plugin
+/plugin marketplace add zebbern/multi-collaboration
 ```
 
-Install the plugin:
+Install the Codex plugin:
 
 ```bash
-/plugin install codex@codex-collaborate-plugin
+/plugin install codex@multi-collaboration
+```
+
+Or the Cursor plugin (delegates to Cursor's `cursor-agent` CLI; on Windows it runs through WSL since Cursor ships no native Windows CLI build):
+
+```bash
+/plugin install cursor@multi-collaboration
 ```
 
 (For the official OpenAI plugin instead, use `/plugin marketplace add openai/codex-plugin-cc`.)
