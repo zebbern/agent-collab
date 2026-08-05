@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildStaleCodexCliHint,
   renderJobStatusReport,
   renderNativeReviewResult,
   renderReviewResult,
@@ -333,6 +334,53 @@ test("renderSetupReport surfaces reduced Windows cleanup safety only on win32", 
 
   const unknown = renderSetupReport(buildSetupReportFixture({ platform: undefined }));
   assert.doesNotMatch(unknown, /process cleanup: reduced safety/);
+});
+
+test("buildStaleCodexCliHint flags a config rejected by an outdated Codex CLI", () => {
+  const hint = buildStaleCodexCliHint(
+    buildSetupReportFixture({
+      auth: {
+        detail:
+          "failed to read configuration layers: C:\\Users\\zeb\\.codex\\config.toml:4:16: unknown variant `default`, expected `fast` or `flex`"
+      }
+    })
+  );
+
+  assert.match(hint, /Codex CLI looks outdated/);
+  assert.match(hint, /npm install -g @openai\/codex/);
+  assert.match(hint, /rerun `\/codex:setup`/);
+});
+
+test("buildStaleCodexCliHint flags a backend response an outdated Codex CLI cannot decode", () => {
+  const hint = buildStaleCodexCliHint(
+    buildSetupReportFixture({
+      codex: {
+        detail:
+          "codex-cli test; advanced runtime unavailable: failed to refresh available models: stream disconnected before completion: failed to decode models response: unknown variant `max`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`"
+      }
+    })
+  );
+
+  assert.match(hint, /Codex CLI looks outdated/);
+  assert.match(hint, /npm install -g @openai\/codex/);
+});
+
+test("buildStaleCodexCliHint stays quiet for ordinary setup failures", () => {
+  assert.equal(buildStaleCodexCliHint(buildSetupReportFixture({ auth: { detail: "not logged in" } })), null);
+  assert.equal(buildStaleCodexCliHint(buildSetupReportFixture({ auth: { detail: "config/read failed for cwd" } })), null);
+  assert.equal(buildStaleCodexCliHint(buildSetupReportFixture()), null);
+});
+
+test("renderSetupReport surfaces the stale Codex CLI hint under next steps", () => {
+  const report = buildSetupReportFixture({
+    ready: false,
+    auth: { detail: "failed to read configuration layers: config.toml:4:16: unknown variant `default`, expected `fast` or `flex`" }
+  });
+  const output = renderSetupReport({ ...report, nextSteps: [buildStaleCodexCliHint(report)] });
+
+  assert.match(output, /Next steps:/);
+  assert.match(output, /- The Codex CLI looks outdated for this configuration or backend\./);
+  assert.match(output, /npm install -g @openai\/codex/);
 });
 
 test("renderStatusReport keeps live details previews alongside progress signals", () => {

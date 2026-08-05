@@ -205,6 +205,23 @@ function appendReasoningSection(lines, reasoningSummary) {
   }
 }
 
+const CODEX_VERSION_SKEW_PATTERNS = [
+  /unknown variant/,
+  /failed to decode .* response/,
+  /failed to read configuration layers/
+];
+
+export function buildStaleCodexCliHint(report) {
+  const details = [report?.codex?.detail, report?.auth?.detail];
+  const versionSkewDetected = details.some((detail) =>
+    CODEX_VERSION_SKEW_PATTERNS.some((pattern) => pattern.test(String(detail ?? "")))
+  );
+  if (!versionSkewDetected) {
+    return null;
+  }
+  return "The Codex CLI looks outdated for this configuration or backend. Update it with `npm install -g @openai/codex`, then rerun `/codex:setup`.";
+}
+
 export function renderSetupReport(report) {
   const lines = [
     "# Codex Setup",

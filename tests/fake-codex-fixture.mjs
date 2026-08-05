@@ -354,6 +354,9 @@ rl.on("line", (line) => {
         if (BEHAVIOR === "config-read-fails") {
           throw new Error("config/read failed for cwd");
         }
+        if (BEHAVIOR === "config-read-version-skew") {
+          throw new Error("failed to read configuration layers: /home/user/.codex/config.toml:4:16: unknown variant \`default\`, expected \`fast\` or \`flex\`");
+        }
         send({ id: message.id, result: buildConfigReadResult() });
         break;
 
