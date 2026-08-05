@@ -111,6 +111,12 @@ function finalText() {
   return "Handled the requested task.\\nTask prompt accepted.";
 }
 
+if (process.env.CURSOR_FAKE_WRITE_FILE) {
+  // Simulates an agent writing into the workspace during a read-mode run,
+  // which the companion's workspace-drift check must surface.
+  fs.writeFileSync(process.env.CURSOR_FAKE_WRITE_FILE, "agent scratch\\n");
+}
+
 send({
   type: "system",
   subtype: "init",

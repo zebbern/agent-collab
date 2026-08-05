@@ -3,7 +3,13 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
+import {
+  captureWorkingTreeFingerprint,
+  collectReviewContext,
+  detectWorkspaceDrift,
+  renderWorkspaceDriftSection,
+  resolveReviewTarget
+} from "../plugins/codex/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
@@ -217,4 +223,36 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.doesNotMatch(context.content, /TRACKED_MARKER_[AB]/);
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
+});
+
+test("workspace drift detects new files AND rewrites of already-dirty files", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  // The caller's own pre-run dirt: a modified tracked file and an untracked
+  // scratch file. Neither may be reported while untouched.
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('user-wip');\n");
+  fs.writeFileSync(path.join(cwd, "notes.txt"), "user notes\n");
+
+  const before = captureWorkingTreeFingerprint(cwd);
+  assert.deepEqual(detectWorkspaceDrift(before, cwd), []);
+
+  // Agent-era writes: a brand-new file and a rewrite of the user's dirty
+  // file. Both must surface — path-set membership alone misses the second.
+  fs.writeFileSync(path.join(cwd, "agent-scratch.txt"), "scratch\n");
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('agent-overwrite');\n");
+  assert.deepEqual(detectWorkspaceDrift(before, cwd), ["agent-scratch.txt", "app.js"]);
+});
+
+test("workspace drift distinguishes unverifiable from clean", () => {
+  // A missing before-fingerprint is unknown state, never proof of a clean
+  // run; the rendered section must say so out loud.
+  assert.equal(detectWorkspaceDrift(null, "C:/nonexistent"), null);
+  assert.match(renderWorkspaceDriftSection(null), /Workspace containment unverified/);
+  assert.equal(renderWorkspaceDriftSection([]), "");
+  const section = renderWorkspaceDriftSection(["agent-scratch.txt"]);
+  assert.match(section, /Workspace changes during review/);
+  assert.match(section, /- agent-scratch\.txt/);
 });

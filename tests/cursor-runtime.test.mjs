@@ -379,6 +379,62 @@ test("review runs read-only and renders structured findings", () => {
   // record without it is uncancellable (cancel refuses unproven PIDs).
   assert.equal(typeof storedJob.processIdentity, "string", JSON.stringify(storedJob));
   assert.match(storedJob.processIdentity, /@/);
+  // A well-behaved agent leaves the workspace untouched: no drift section.
+  assert.doesNotMatch(result.stdout, /Workspace changes during review/);
+  assert.deepEqual(storedJob.result.workspaceDrift, []);
+});
+
+test("review surfaces files the agent wrote into the workspace", () => {
+  const repo = makeReviewRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: {
+      ...withTestBinaryOverride(binDir),
+      CURSOR_FAKE_WRITE_FILE: path.join(repo, "agent-scratch.txt")
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  // Reviews have no enforced read-only sandbox under --trust, so a write by
+  // the agent must be reported loudly instead of slipping into the repo
+  // unannounced (live incident: a review wrote git-diff helper scripts that
+  // a blind `git add -A` then committed).
+  assert.match(result.stdout, /## Workspace changes during review/);
+  assert.match(result.stdout, /agent-scratch\.txt/);
+
+  const { storedJob } = readLatestJob(repo);
+  assert.deepEqual(storedJob.result.workspaceDrift, ["agent-scratch.txt"]);
+});
+
+test("review surfaces an agent rewrite of a file the user already had dirty", () => {
+  const repo = makeReviewRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  // The user's own uncommitted work — the review target is dirty before the
+  // agent ever runs, which is the common working-tree review shape.
+  const dirtyFile = path.join(repo, "user-wip.txt");
+  fs.writeFileSync(dirtyFile, "user work in progress\n");
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: {
+      ...withTestBinaryOverride(binDir),
+      CURSOR_FAKE_WRITE_FILE: dirtyFile
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  // Path-set membership alone would miss this: the file was dirty before
+  // and after. Content fingerprinting must catch the rewrite.
+  assert.match(result.stdout, /## Workspace changes during review/);
+  assert.match(result.stdout, /user-wip\.txt/);
+
+  const { storedJob } = readLatestJob(repo);
+  assert.deepEqual(storedJob.result.workspaceDrift, ["user-wip.txt"]);
 });
 
 test("adversarial review passes focus text into the prompt", () => {

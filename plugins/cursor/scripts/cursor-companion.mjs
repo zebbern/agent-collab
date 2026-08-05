@@ -18,7 +18,14 @@ import {
   runCursorTurn
 } from "./lib/cursor.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import {
+  captureWorkingTreeFingerprintSafe,
+  collectReviewContext,
+  detectWorkspaceDrift,
+  ensureGitRepository,
+  renderWorkspaceDriftSection,
+  resolveReviewTarget
+} from "./lib/git.mjs";
 import {
   binaryAvailable,
   captureProcessOwnership,
@@ -289,6 +296,11 @@ function buildReviewPrompt(context, focusText, reviewName) {
   return [
     prompt,
     "",
+    // cursor-agent has no enforced read-only sandbox (--trust suppresses the
+    // write prompt), so the no-write rule must ride in the prompt and any
+    // violation is surfaced by the post-run workspace-drift check.
+    "Never create, modify, or delete files in the workspace: you are reviewing, not editing. Do not write helper scripts, notes, or diff dumps to disk.",
+    "",
     "<output_schema>",
     "Your final message must be only valid JSON matching this JSON Schema. Do not wrap it in markdown fences.",
     JSON.stringify(schema, null, 2),
@@ -353,6 +365,7 @@ async function executeReviewRun(request) {
 
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildReviewPrompt(context, focusText, reviewName);
+  const treeBefore = captureWorkingTreeFingerprintSafe(context.repoRoot);
   const result = await runCursorTurn(context.repoRoot, {
     prompt,
     model: request.model,
@@ -360,6 +373,7 @@ async function executeReviewRun(request) {
     onProgress: request.onProgress,
     onWslAgentPid: request.onWslAgentPid
   });
+  const workspaceDrift = detectWorkspaceDrift(treeBefore, context.repoRoot);
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -383,7 +397,8 @@ async function executeReviewRun(request) {
     parseError: parsed.parseError,
     transport: result.transport ?? null,
     transportReason: result.transportReason ?? null,
-    model: result.model ?? null
+    model: result.model ?? null,
+    workspaceDrift
   };
 
   return {
@@ -391,11 +406,12 @@ async function executeReviewRun(request) {
     threadId: result.threadId,
     turnId: result.turnId,
     payload,
-    rendered: renderReviewResult(parsed, {
-      reviewLabel: reviewName,
-      targetLabel: context.target.label,
-      threadId: result.threadId
-    }),
+    rendered:
+      renderReviewResult(parsed, {
+        reviewLabel: reviewName,
+        targetLabel: context.target.label,
+        threadId: result.threadId
+      }) + renderWorkspaceDriftSection(workspaceDrift),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Cursor ${reviewName}`,
     jobClass: "review",

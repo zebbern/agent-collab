@@ -23,7 +23,14 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import {
+  captureWorkingTreeFingerprintSafe,
+  collectReviewContext,
+  detectWorkspaceDrift,
+  ensureGitRepository,
+  renderWorkspaceDriftSection,
+  resolveReviewTarget
+} from "./lib/git.mjs";
 import {
   binaryAvailable,
   captureProcessOwnership,
@@ -503,6 +510,9 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 async function executeReviewRun(request) {
   ensureCodexAvailable(request.cwd);
   ensureGitRepository(request.cwd);
+  // Codex's read-only sandbox should make this a no-op; the check verifies
+  // that claim on every review instead of assuming it.
+  const treeBefore = captureWorkingTreeFingerprintSafe(request.cwd);
 
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
@@ -530,19 +540,22 @@ async function executeReviewRun(request) {
         reasoning: result.reasoningSummary
       }
     };
-    const rendered = renderNativeReviewResult(
-      {
-        status: result.status,
-        stdout: result.reviewText,
-        stderr: result.stderr
-      },
-      {
-        reviewLabel: reviewName,
-        targetLabel: target.label,
-        reasoningSummary: result.reasoningSummary,
-        threadId: result.threadId
-      }
-    );
+    const workspaceDrift = detectWorkspaceDrift(treeBefore, request.cwd);
+    payload.workspaceDrift = workspaceDrift;
+    const rendered =
+      renderNativeReviewResult(
+        {
+          status: result.status,
+          stdout: result.reviewText,
+          stderr: result.stderr
+        },
+        {
+          reviewLabel: reviewName,
+          targetLabel: target.label,
+          reasoningSummary: result.reasoningSummary,
+          threadId: result.threadId
+        }
+      ) + renderWorkspaceDriftSection(workspaceDrift);
 
     return {
       exitStatus: result.status,
@@ -588,7 +601,8 @@ async function executeReviewRun(request) {
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
     parseError: parsed.parseError,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    workspaceDrift: detectWorkspaceDrift(treeBefore, request.cwd)
   };
 
   return {
@@ -596,12 +610,13 @@ async function executeReviewRun(request) {
     threadId: result.threadId,
     turnId: result.turnId,
     payload,
-    rendered: renderReviewResult(parsed, {
-      reviewLabel: reviewName,
-      targetLabel: context.target.label,
-      reasoningSummary: result.reasoningSummary,
-      threadId: result.threadId
-    }),
+    rendered:
+      renderReviewResult(parsed, {
+        reviewLabel: reviewName,
+        targetLabel: context.target.label,
+        reasoningSummary: result.reasoningSummary,
+        threadId: result.threadId
+      }) + renderWorkspaceDriftSection(payload.workspaceDrift),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",

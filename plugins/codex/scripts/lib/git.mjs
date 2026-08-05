@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -130,6 +131,87 @@ export function getWorkingTreeState(cwd) {
     untracked,
     isDirty: staged.length > 0 || unstaged.length > 0 || untracked.length > 0
   };
+}
+
+// Workspace-drift detection: catches an agent writing into the workspace
+// during a run that was supposed to be read-mode. The fingerprint hashes the
+// on-disk content of every git-visible dirty path, so both a NEW file and a
+// rewrite of an already-dirty file are caught — path-set membership alone
+// would miss the second, which is the worse failure (it corrupts the user's
+// uncommitted work silently). Ignored paths stay out of scope: they cannot
+// reach a commit through git add and hashing build output is not worth it.
+export function captureWorkingTreeFingerprint(cwd) {
+  const state = getWorkingTreeState(cwd);
+  const repoRoot = getRepoRoot(cwd);
+  const files = {};
+  for (const file of new Set([...state.staged, ...state.unstaged, ...state.untracked])) {
+    try {
+      files[file] = createHash("sha256").update(fs.readFileSync(path.join(repoRoot, file))).digest("hex");
+    } catch {
+      files[file] = "unreadable";
+    }
+  }
+  return { files };
+}
+
+export function diffWorkingTreeFingerprints(before, after) {
+  const changed = [];
+  for (const [file, hash] of Object.entries(after.files)) {
+    if (before.files[file] !== hash) {
+      changed.push(file);
+    }
+  }
+  return changed.sort();
+}
+
+export function captureWorkingTreeFingerprintSafe(cwd) {
+  try {
+    return captureWorkingTreeFingerprint(cwd);
+  } catch {
+    // Drift detection is best-effort; a git failure must not sink the run —
+    // but it must surface as unverifiable, never as clean.
+    return null;
+  }
+}
+
+/**
+ * Returns the drifted paths, or null when containment could not be verified.
+ * Null is deliberately distinct from []: an unreadable tree is unknown state,
+ * not proof the agent behaved.
+ */
+export function detectWorkspaceDrift(fingerprintBefore, cwd) {
+  if (!fingerprintBefore) {
+    return null;
+  }
+  try {
+    return diffWorkingTreeFingerprints(fingerprintBefore, captureWorkingTreeFingerprint(cwd));
+  } catch {
+    return null;
+  }
+}
+
+export function renderWorkspaceDriftSection(drift) {
+  if (drift === null) {
+    return [
+      "",
+      "",
+      "## Workspace containment unverified",
+      "",
+      "The working tree could not be snapshotted around this review, so agent writes cannot be ruled out. Inspect `git status` before staging or committing anything."
+    ].join("\n");
+  }
+  if (!Array.isArray(drift) || drift.length === 0) {
+    return "";
+  }
+  return [
+    "",
+    "",
+    "## Workspace changes during review",
+    "",
+    `The review agent created or modified ${drift.length} file(s) even though reviews run in read mode. Inspect them before staging or committing anything:`,
+    "",
+    ...drift.map((file) => `- ${file}`)
+  ].join("\n");
 }
 
 export function resolveReviewTarget(cwd, options = {}) {
