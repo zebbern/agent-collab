@@ -91,6 +91,7 @@ A first run that shows the whole loop:
 | `/codex:transfer` | Turn the current Claude session into a resumable Codex thread |
 | `/codex:status` / `/codex:result` / `/codex:cancel` | Track, read, and stop background jobs |
 | `/codex:setup` | Readiness check, install help, and the optional review gate |
+| `/codex:doctor` | Read-only health report: CLI, auth, broker residue, and job-state hygiene |
 | `/codex:help` | Full CLI usage |
 
 <details>
@@ -217,6 +218,7 @@ Drives Cursor's headless [`cursor-agent`](https://cursor.com/docs/cli) CLI. Ever
 | `/cursor:rescue` | Hand a problem to the `cursor:cursor-rescue` subagent — investigate, fix, or continue with `--resume <chat-id>` |
 | `/cursor:status` / `/cursor:result` / `/cursor:cancel` | Track, read, and stop background jobs |
 | `/cursor:setup` | Readiness check with per-platform install guidance |
+| `/cursor:doctor` | Read-only health report: CLI, auth, and job-state hygiene |
 | `/cursor:help` | Full CLI usage |
 
 ### Models

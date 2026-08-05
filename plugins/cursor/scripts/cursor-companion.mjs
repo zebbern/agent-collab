@@ -30,14 +30,16 @@ import {
   terminateProcessTree
 } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-import { generateJobId, upsertJob, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
+import { generateJobId, listJobs, resolveStateDir, upsertJob, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  getLiveJobPids,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob
 } from "./lib/job-control.mjs";
+import { buildLivenessProbe, buildStateHygieneChecks, renderDoctorReport, runDoctorChecks } from "./lib/doctor.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -78,6 +80,7 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/cursor-companion.mjs setup [--json]",
+      "  node scripts/cursor-companion.mjs doctor [--json]",
       "  node scripts/cursor-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
       "  node scripts/cursor-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json] [focus text]",
       "  node scripts/cursor-companion.mjs task [--background] [--write] [--model <model>] [--resume <chat-id>] [--prompt-file <path>] [prompt]",
@@ -211,6 +214,64 @@ async function handleSetup(argv) {
   const cwd = resolveCommandCwd(options);
   const report = await buildSetupReport(cwd);
   outputResult(options.json ? report : renderSetupReport(report), options.json);
+}
+
+async function handleDoctor(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+
+  const cursorStatus = getCursorAvailability(cwd);
+  const authStatus = cursorStatus.available ? await getCursorAuthStatus(cwd) : null;
+
+  const checks = [
+    {
+      id: "cursor-cli",
+      run: () => {
+        if (cursorStatus.available) {
+          const transportNote = cursorStatus.transport === "wsl" ? " via WSL" : "";
+          return { status: "ok", message: `cursor-agent available${transportNote} (${cursorStatus.detail}).` };
+        }
+        return {
+          status: "error",
+          message:
+            process.platform === "win32"
+              ? `cursor-agent not found (${cursorStatus.detail}). There is no native Windows build — install it inside WSL with \`curl https://cursor.com/install -fsS | bash\`.`
+              : `cursor-agent not found (${cursorStatus.detail}). Install it with \`curl https://cursor.com/install -fsS | bash\`.`
+        };
+      }
+    },
+    {
+      id: "cursor-auth",
+      run: () => {
+        if (!authStatus) {
+          return { status: "warning", message: "Skipped: cursor-agent is unavailable." };
+        }
+        if (authStatus.loggedIn) {
+          return { status: "ok", message: "Cursor is authenticated." };
+        }
+        return {
+          status: "error",
+          message:
+            cursorStatus.transport === "wsl"
+              ? "Cursor is not logged in — run `cursor-agent login` inside WSL, or set CURSOR_API_KEY."
+              : "Cursor is not logged in — run `cursor-agent login`, or set CURSOR_API_KEY."
+        };
+      }
+    },
+    ...buildStateHygieneChecks({
+      stateDir: resolveStateDir(workspaceRoot),
+      jobs: listJobs(workspaceRoot),
+      getLiveJobPidsImpl: buildLivenessProbe((jobs) => getLiveJobPids(jobs)),
+      commandPrefix: "/cursor"
+    })
+  ];
+
+  const report = await runDoctorChecks(checks);
+  outputResult(options.json ? report : renderDoctorReport(report, { title: "Cursor Doctor" }), options.json);
 }
 
 function buildReviewPrompt(context, focusText, reviewName) {
@@ -993,6 +1054,9 @@ async function main() {
   switch (subcommand) {
     case "setup":
       await handleSetup(argv);
+      break;
+    case "doctor":
+      await handleDoctor(argv);
       break;
     case "review":
       await handleReviewCommand(argv, {

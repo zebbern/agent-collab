@@ -1,6 +1,8 @@
 // Mirrors the codex state concurrency tests for the cursor plugin's copy of
 // the chassis: the state index must never resurrect a terminal job, and
 // cross-process updates must serialize through the state lock.
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -10,9 +12,11 @@ import { makeTempDir } from "./helpers.mjs";
 import {
   listJobs,
   loadState,
+  resolveStateDir,
   saveState,
   updateState,
-  upsertJob
+  upsertJob,
+  writeJobFile
 } from "../plugins/cursor/scripts/lib/state.mjs";
 
 test("a stale snapshot save cannot resurrect a cancelled job", () => {
@@ -41,6 +45,23 @@ test("upsertJob refuses to revive a terminal job", () => {
   const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
   assert.equal(job.status, "cancelled");
   assert.equal(job.pid ?? null, null);
+});
+
+test("a corrupt state.json is quarantined and the rebuilt index is persisted", () => {
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-survivor", status: "completed", pid: null });
+  writeJobFile(workspace, "task-survivor", { id: "task-survivor", status: "completed" });
+
+  const stateFile = path.join(resolveStateDir(workspace), "state.json");
+  fs.writeFileSync(stateFile, "{ not valid json");
+
+  const rebuilt = loadState(workspace);
+  assert.equal(rebuilt.jobs.some((job) => job.id === "task-survivor"), true);
+  assert.equal(fs.existsSync(stateFile), true);
+  const reread = loadState(workspace);
+  assert.equal(reread.jobs.some((job) => job.id === "task-survivor"), true);
+  const quarantined = fs.readdirSync(resolveStateDir(workspace)).filter((name) => name.includes(".corrupt-"));
+  assert.equal(quarantined.length, 1);
 });
 
 test("concurrent state updates are serialized by the state lock", async () => {

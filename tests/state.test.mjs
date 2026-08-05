@@ -251,7 +251,13 @@ test("loadState quarantines a corrupt state file and rebuilds from surviving job
 
   assert.deepEqual(state.jobs.map((job) => job.id), ["job-newer", "job-older"]);
   assert.equal(state.config.stopReviewGate, false);
-  assert.equal(fs.existsSync(stateFile), false);
+  // The rebuild is persisted durably in the same call: the state file is
+  // rewritten, not left missing for the next reader to see an empty default.
+  assert.equal(fs.existsSync(stateFile), true);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(stateFile, "utf8")).jobs.map((job) => job.id),
+    ["job-newer", "job-older"]
+  );
   assert.equal(
     fs.readdirSync(path.dirname(stateFile)).filter((entry) => entry.startsWith("state.json.corrupt-")).length,
     1
@@ -351,6 +357,28 @@ test("upsertJob refuses to revive a terminal job", () => {
   const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
   assert.equal(job.status, "cancelled");
   assert.equal(job.pid ?? null, null);
+});
+
+test("a corrupt state.json is quarantined and the rebuilt index is persisted", () => {
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-survivor", status: "completed", pid: null });
+  writeJobFile(workspace, "task-survivor", { id: "task-survivor", status: "completed" });
+
+  const stateFile = path.join(resolveStateDir(workspace), "state.json");
+  fs.writeFileSync(stateFile, "{ not valid json");
+
+  const rebuilt = loadState(workspace);
+  assert.equal(rebuilt.jobs.some((job) => job.id === "task-survivor"), true);
+
+  // The rebuild must be durable: a fresh read of the (rewritten) state file
+  // must still know the job, and the corrupt original must be quarantined
+  // alongside it — otherwise the next reader sees an empty default index
+  // and every jobs/*.json becomes an orphan.
+  assert.equal(fs.existsSync(stateFile), true);
+  const reread = loadState(workspace);
+  assert.equal(reread.jobs.some((job) => job.id === "task-survivor"), true);
+  const quarantined = fs.readdirSync(resolveStateDir(workspace)).filter((name) => name.includes(".corrupt-"));
+  assert.equal(quarantined.length, 1);
 });
 
 test("concurrent state updates are serialized by the state lock", async () => {

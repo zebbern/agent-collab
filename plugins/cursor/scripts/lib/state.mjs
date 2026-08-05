@@ -143,24 +143,41 @@ export function loadState(cwd) {
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : []
     };
   } catch {
-    quarantineCorruptStateFile(stateFile);
+    // Copy-then-replace recovery: the corrupt file stays in place until the
+    // rebuilt index atomically renames over it, so no reader ever observes
+    // a missing state file (a missing file reads as an empty default index
+    // and strands every jobs/*.json as an orphan). If persisting fails, the
+    // corrupt original remains on disk and the next reader retries this
+    // same recovery instead of inheriting silent loss. writeJsonFileAtomic,
+    // not saveStateUnlocked — the latter re-enters loadState.
+    preserveCorruptStateCopy(stateFile);
     const rebuiltJobs = rebuildJobsFromJobFiles(cwd);
-    process.stderr.write(
-      `Warning: ${stateFile} is corrupt and was quarantined; rebuilt ${rebuiltJobs.length} job(s) from jobs/*.json.\n`
-    );
-    return {
+    const rebuiltState = {
       ...defaultState(),
       jobs: rebuiltJobs
     };
+    let persisted = true;
+    try {
+      ensureStateDir(cwd);
+      writeJsonFileAtomic(stateFile, rebuiltState);
+    } catch {
+      persisted = false;
+    }
+    process.stderr.write(
+      persisted
+        ? `Warning: ${stateFile} was corrupt; a copy was quarantined and the index was rebuilt from ${rebuiltJobs.length} job file(s).\n`
+        : `Warning: ${stateFile} is corrupt and the rebuilt index could not be persisted; recovery will retry on the next read.\n`
+    );
+    return rebuiltState;
   }
 }
 
-function quarantineCorruptStateFile(stateFile) {
+function preserveCorruptStateCopy(stateFile) {
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    fs.renameSync(stateFile, `${stateFile}.corrupt-${timestamp}`);
+    fs.copyFileSync(stateFile, `${stateFile}.corrupt-${timestamp}`);
   } catch {
-    // Best-effort quarantine: recovery must never throw.
+    // Best-effort quarantine copy: recovery must never throw.
   }
 }
 

@@ -27,6 +27,7 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import {
   binaryAvailable,
   captureProcessOwnership,
+  getLiveProcessPids,
   getProcessIdentity,
   getOwnWindowsProcessIdentity,
   matchesWindowsIdentity,
@@ -39,6 +40,7 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  resolveStateDir,
   setConfig,
   upsertJob,
   writeCancelFlag,
@@ -47,11 +49,20 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  getLiveJobPids,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
+import {
+  buildLivenessProbe,
+  buildProcessTableGuard,
+  buildStateHygieneChecks,
+  renderDoctorReport,
+  runDoctorChecks
+} from "./lib/doctor.mjs";
+import { runRegisteredBrokerReaper } from "./registered-broker-reaper.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -98,6 +109,7 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
+      "  node scripts/codex-companion.mjs doctor [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--prompt-file <path>] [prompt]",
@@ -243,6 +255,106 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     actionsTaken,
     nextSteps
   };
+}
+
+async function handleDoctor(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+
+  const codexStatus = getCodexAvailability(cwd);
+  const authStatus = codexStatus.available ? await getCodexAuthStatus(cwd) : null;
+
+  const checks = [
+    {
+      id: "codex-cli",
+      run: () =>
+        codexStatus.available
+          ? { status: "ok", message: `codex CLI available (${codexStatus.detail}).` }
+          : { status: "error", message: "codex CLI not found — install it with `npm install -g @openai/codex`, then run `/codex:setup`." }
+    },
+    {
+      id: "codex-auth",
+      run: () => {
+        if (!authStatus) {
+          return { status: "warning", message: "Skipped: the codex CLI is unavailable." };
+        }
+        if (authStatus.loggedIn) {
+          return { status: "ok", message: "Codex is authenticated." };
+        }
+        return {
+          status: "error",
+          message: "Codex is not logged in — run `!codex login` (or `codex login --device-auth` when browser login is blocked)."
+        };
+      }
+    },
+    {
+      id: "codex-cli-freshness",
+      run: () => {
+        if (!authStatus) {
+          return { status: "ok", message: "Skipped: the codex CLI is unavailable." };
+        }
+        const hint = buildStaleCodexCliHint({ codex: codexStatus, auth: authStatus });
+        return hint
+          ? { status: "warning", message: hint }
+          : { status: "ok", message: "No version-skew signals from the CLI." };
+      }
+    },
+    {
+      id: "broker-residue",
+      run: async () => {
+        if (process.platform === "win32") {
+          return { status: "ok", message: "Not applicable: the shared broker only runs on Unix." };
+        }
+        // The sentinel guard turns a fail-closed candidate echo (process
+        // table unreadable) into a throw, which the owner assessment maps to
+        // its own owner-liveness-unavailable reason — without it, dead
+        // owners read as live and this check goes green in exactly the
+        // broken environments doctor exists to expose.
+        const summary = await runRegisteredBrokerReaper({
+          env: process.env,
+          getLiveProcessPidsImpl: buildProcessTableGuard(getLiveProcessPids)
+        });
+        // Only assessments the reaper itself judged safe get the "SessionStart
+        // reaps this automatically" promise; every other non-live reason
+        // (probe failures, malformed records) is something apply mode will
+        // also refuse, so it needs a human.
+        const reapable = summary.results.filter((result) => result.reason === "eligible-but-apply-not-enabled");
+        const attention = summary.results.filter(
+          (result) => result.reason !== "live-owner" && result.reason !== "eligible-but-apply-not-enabled"
+        );
+        if (summary.scanned === 0 || (reapable.length === 0 && attention.length === 0)) {
+          return {
+            status: "ok",
+            message: summary.scanned === 0 ? "No registered brokers." : `${summary.scanned} registered broker(s), all owned by live sessions.`
+          };
+        }
+        const describe = (result) => `broker_key=${result.brokerKey ?? "unknown"} pid=${result.pid ?? "unknown"} (${result.reason})`;
+        return {
+          status: "warning",
+          message: [
+            reapable.length > 0 ? `${reapable.length} dead broker(s) that the next SessionStart reaps automatically` : null,
+            attention.length > 0 ? `${attention.length} registration(s) needing manual attention (SessionStart will not touch them)` : null
+          ]
+            .filter(Boolean)
+            .join("; ") + ".",
+          details: [...reapable.map(describe), ...attention.map((result) => `${describe(result)} — manual`)]
+        };
+      }
+    },
+    ...buildStateHygieneChecks({
+      stateDir: resolveStateDir(workspaceRoot),
+      jobs: listJobs(workspaceRoot),
+      getLiveJobPidsImpl: buildLivenessProbe((jobs) => getLiveJobPids(jobs)),
+      commandPrefix: "/codex"
+    })
+  ];
+
+  const report = await runDoctorChecks(checks);
+  outputResult(options.json ? report : renderDoctorReport(report, { title: "Codex Doctor" }), options.json);
 }
 
 async function handleSetup(argv) {
@@ -1236,6 +1348,9 @@ async function main() {
   switch (subcommand) {
     case "setup":
       await handleSetup(argv);
+      break;
+    case "doctor":
+      await handleDoctor(argv);
       break;
     case "review":
       await handleReview(argv);
