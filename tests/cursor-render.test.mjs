@@ -12,6 +12,30 @@ import {
   renderStoredJobResult,
   renderTaskResult
 } from "../plugins/cursor/scripts/lib/render.mjs";
+import { parseStructuredOutput } from "../plugins/cursor/scripts/lib/cursor.mjs";
+
+test("parseStructuredOutput recovers JSON embedded in model narration", () => {
+  // Condensed from a real live review: the model narrated (including braces
+  // inside string values) before emitting the JSON object.
+  const narrated =
+    "I'll inspect the diff against `12b9ac8` and dig into the high-risk paths." +
+    "Shell was blocked; retrying with a narrower read-only git inspection." +
+    '{"verdict":"needs-attention","summary":"Do not ship: unlocked {state.json} RMW.",' +
+    '"findings":[{"severity":"high","title":"Race","body":"a } inside \\"quotes\\" stays balanced.",' +
+    '"file":"plugins/cursor/scripts/lib/state.mjs","line_start":174,"line_end":178}],"next_steps":["Add a failing test."]}';
+  const parsed = parseStructuredOutput(narrated);
+  assert.equal(parsed.parseError, null);
+  assert.equal(parsed.parsed.verdict, "needs-attention");
+  assert.equal(parsed.parsed.findings.length, 1);
+
+  const clean = parseStructuredOutput('{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}');
+  assert.equal(clean.parseError, null);
+  assert.equal(clean.parsed.verdict, "approve");
+
+  const hopeless = parseStructuredOutput("no json here at all");
+  assert.equal(hopeless.parsed, null);
+  assert.ok(hopeless.parseError);
+});
 
 test("renderSetupReport labels the WSL transport with its reason", () => {
   const output = renderSetupReport({

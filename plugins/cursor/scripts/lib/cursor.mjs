@@ -794,6 +794,45 @@ function stripJsonCodeFence(text) {
   return match ? match[1] : text;
 }
 
+function extractEmbeddedJsonObject(text) {
+  // Walk the text and return the last balanced top-level {...} span, tracking
+  // strings and escapes so braces inside JSON string values do not miscount.
+  let best = null;
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+    } else if (char === "}") {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start !== -1) {
+          best = text.slice(start, index + 1);
+        }
+      }
+    }
+  }
+  return best;
+}
+
 export function parseStructuredOutput(rawOutput, fallback = {}) {
   if (!rawOutput) {
     return {
@@ -813,10 +852,26 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
       rawOutput,
       ...fallback
     };
-  } catch (error) {
+  } catch (primaryError) {
+    // Observed in live runs: the model narrates before the JSON ("I'll
+    // inspect the diff...{...}"). Recover the last balanced top-level JSON
+    // object embedded in the text.
+    const embedded = extractEmbeddedJsonObject(stripJsonCodeFence(rawOutput));
+    if (embedded) {
+      try {
+        return {
+          parsed: JSON.parse(embedded),
+          parseError: null,
+          rawOutput,
+          ...fallback
+        };
+      } catch {
+        // fall through to the primary error
+      }
+    }
     return {
       parsed: null,
-      parseError: error.message,
+      parseError: primaryError.message,
       rawOutput,
       ...fallback
     };
