@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -1066,7 +1067,7 @@ test("automatic and explicit reuse paths refuse a live unregistered endpoint", a
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "review-ok");
-  const socketPath = path.join("/private/tmp", `cxc-unregistered-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-unregistered-${process.pid}-${Date.now()}.sock`);
   const endpoint = `unix:${socketPath}`;
   let brokerConnections = 0;
   const server = net.createServer((socket) => {
@@ -1127,7 +1128,7 @@ test("automatic broker rolls back when the broker registration cannot be publish
 
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  const socketPath = path.join("/private/tmp", `cxc-publish-failure-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-publish-failure-${process.pid}-${Date.now()}.sock`);
   installFakeCodex(binDir, "review-ok");
   const ownerIdentity = getProcessIdentity(process.pid);
   const env = {
@@ -1177,7 +1178,7 @@ test("automatic broker rolls back when owner, state, or activation publication f
   for (const failure of ["owner", "state", "activation"]) {
     const repo = makeTempDir();
     const binDir = makeTempDir();
-    const socketPath = path.join("/private/tmp", `cxc-${failure}-failure-${process.pid}-${Date.now()}.sock`);
+    const socketPath = path.join(os.tmpdir(), `cxc-${failure}-failure-${process.pid}-${Date.now()}.sock`);
     installFakeCodex(binDir, "review-ok");
     const env = {
       ...buildEnv(binDir),
@@ -1463,7 +1464,7 @@ test("automatic broker falls back without leaving a process when session ownersh
 
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  const socketPath = path.join("/private/tmp", `cxc-owner-unavailable-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-owner-unavailable-${process.pid}-${Date.now()}.sock`);
   installFakeCodex(binDir, "review-ok");
   let endpointFactoryCalled = false;
   let brokerPid = null;
@@ -1580,7 +1581,7 @@ test("a detached test broker self-expires when its test runner cannot clean it",
   }
 
   const repo = makeTempDir();
-  const socketPath = path.join("/private/tmp", `cxc-test-ttl-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-test-ttl-${process.pid}-${Date.now()}.sock`);
   const endpoint = `unix:${socketPath}`;
   const broker = spawn(process.execPath, [BROKER_SCRIPT, "serve", "--endpoint", endpoint, "--cwd", repo], {
     cwd: repo,
@@ -1613,7 +1614,7 @@ test("pre-activation broker exits when its launcher pipe closes", async (t) => {
 
   const repo = makeTempDir();
   const sessionDir = makeTempDir("cxc-launcher-exit-");
-  const socketPath = path.join("/private/tmp", `cxc-launcher-exit-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-launcher-exit-${process.pid}-${Date.now()}.sock`);
   const endpoint = `unix:${socketPath}`;
   const pidFile = path.join(sessionDir, "broker.pid");
   const child = spawn(
@@ -1673,7 +1674,7 @@ test("an unregistered broker refuses to activate a detached app-server child", a
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
-  const socketPath = path.join("/private/tmp", `cxc-unregistered-child-${process.pid}-${Date.now()}.sock`);
+  const socketPath = path.join(os.tmpdir(), `cxc-unregistered-child-${process.pid}-${Date.now()}.sock`);
   const endpoint = `unix:${socketPath}`;
   installFakeCodex(binDir, "with-helper-child");
   const env = buildEnv(binDir);
@@ -1773,7 +1774,7 @@ test("broker shutdown completes without starting a second app-server", async (t)
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
   installFakeCodex(binDir, "with-resistant-helper");
   const env = withBrokerOwner(buildEnv(binDir), "broker-shutdown");
-  const brokerSocketPath = path.join("/private/tmp", `cxc-p1c-${process.pid}-${Date.now()}.sock`);
+  const brokerSocketPath = path.join(os.tmpdir(), `cxc-p1c-${process.pid}-${Date.now()}.sock`);
   const brokerSession = await ensureBrokerSession(repo, {
     env,
     createBrokerEndpoint: () => `unix:${brokerSocketPath}`
@@ -4882,7 +4883,9 @@ test("shared broker clears a disconnected stream after its request rejects", asy
       }
       throw error;
     }
-  }, { timeoutMs: 1500, intervalMs: 20 });
+    // 5000ms, not 1500: the broker child restart behind this request takes
+    // longer than 1.5s on loaded CI runners.
+  }, { timeoutMs: 5000, intervalMs: 20 });
   assert.ok(Array.isArray(response.data));
 });
 
