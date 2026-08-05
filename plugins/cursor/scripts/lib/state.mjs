@@ -9,8 +9,74 @@ const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "cursor-companion");
 const STATE_FILE_NAME = "state.json";
+const STATE_LOCK_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const STATE_LOCK_TIMEOUT_MS = 5_000;
+const STATE_LOCK_STALE_MS = 10_000;
+const STATE_LOCK_RETRY_MS = 25;
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+export function isTerminalJobStatus(status) {
+  return TERMINAL_JOB_STATUSES.has(status);
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireStateLock(cwd) {
+  ensureStateDir(cwd);
+  const lockFile = path.join(resolveStateDir(cwd), STATE_LOCK_NAME);
+  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      fs.writeFileSync(lockFile, String(process.pid), { flag: "wx" });
+      return lockFile;
+    } catch (error) {
+      if (/** @type {NodeJS.ErrnoException} */ (error)?.code !== "EEXIST") {
+        throw error;
+      }
+    }
+    try {
+      if (Date.now() - fs.statSync(lockFile).mtimeMs > STATE_LOCK_STALE_MS) {
+        fs.unlinkSync(lockFile);
+        continue;
+      }
+    } catch {
+      // Lock vanished between the write attempt and the stat — retry.
+      continue;
+    }
+    if (Date.now() > deadline) {
+      // Availability over strictness: a wedged lock must not brick the CLI.
+      // The terminal-status merge guard in saveState still prevents job
+      // resurrection even on this unlocked path.
+      process.stderr.write(`Warning: state lock at ${lockFile} was busy for ${STATE_LOCK_TIMEOUT_MS}ms; proceeding without it.\n`);
+      return null;
+    }
+    sleepSync(STATE_LOCK_RETRY_MS);
+  }
+}
+
+function releaseStateLock(lockFile) {
+  if (!lockFile) {
+    return;
+  }
+  try {
+    fs.unlinkSync(lockFile);
+  } catch {
+    // Best-effort release: a missing lock file means a stale-steal occurred.
+  }
+}
+
+function withStateLock(cwd, fn) {
+  const lockFile = acquireStateLock(cwd);
+  try {
+    return fn();
+  } finally {
+    releaseStateLock(lockFile);
+  }
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -145,10 +211,20 @@ function writeJsonFileAtomic(filePath, payload) {
   }
 }
 
-export function saveState(cwd, state) {
+function saveStateUnlocked(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
-  const nextJobs = pruneJobs(state.jobs ?? []);
+  // Terminal-status merge guard: a writer holding a snapshot taken before a
+  // job reached a terminal status must not resurrect it — for each incoming
+  // non-terminal job whose on-disk record is already terminal, the on-disk
+  // record wins wholesale (status, pid, and all).
+  const terminalById = new Map(
+    previousJobs.filter((job) => isTerminalJobStatus(job?.status)).map((job) => [job.id, job])
+  );
+  const guardedJobs = (state.jobs ?? []).map((job) =>
+    terminalById.has(job?.id) && !isTerminalJobStatus(job?.status) ? terminalById.get(job.id) : job
+  );
+  const nextJobs = pruneJobs(guardedJobs);
   const nextState = {
     version: STATE_VERSION,
     config: {
@@ -171,10 +247,18 @@ export function saveState(cwd, state) {
   return nextState;
 }
 
+export function saveState(cwd, state) {
+  return withStateLock(cwd, () => saveStateUnlocked(cwd, state));
+}
+
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  // Load inside the lock so the mutation always applies to the freshest
+  // on-disk state rather than a snapshot another process may have replaced.
+  return withStateLock(cwd, () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveStateUnlocked(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {
@@ -194,8 +278,14 @@ export function upsertJob(cwd, jobPatch) {
       });
       return;
     }
+    const existing = state.jobs[existingIndex];
+    if (isTerminalJobStatus(existing.status) && jobPatch.status != null && !isTerminalJobStatus(jobPatch.status)) {
+      // Refuse to revive a terminal job: a late worker or progress writer
+      // must never flip cancelled/failed/completed back to running/queued.
+      return;
+    }
     state.jobs[existingIndex] = {
-      ...state.jobs[existingIndex],
+      ...existing,
       ...jobPatch,
       updatedAt: timestamp
     };

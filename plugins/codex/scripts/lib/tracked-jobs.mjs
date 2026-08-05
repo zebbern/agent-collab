@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { hasCancelFlag, readJobFile, removeCancelFlag, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { hasCancelFlag, isTerminalJobStatus, listJobs, readJobFile, removeCancelFlag, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const JOB_CANCELLED_CODE = "JOB_CANCELLED";
@@ -97,6 +97,13 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     }
 
     if (!changed) {
+      return;
+    }
+
+    // Never write progress over a job that has already reached a terminal
+    // status (a cancel can land while the stream is still emitting events).
+    const currentJob = listJobs(workspaceRoot).find((job) => job.id === jobId);
+    if (currentJob && isTerminalJobStatus(currentJob.status)) {
       return;
     }
 

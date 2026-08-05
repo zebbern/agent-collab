@@ -4,9 +4,12 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { spawnSync } from "node:child_process";
+
 import { makeTempDir } from "./helpers.mjs";
 import {
   ensureStateDir,
+  listJobs,
   loadState,
   resolveJobFile,
   resolveJobLogFile,
@@ -14,6 +17,8 @@ import {
   resolveStateDir,
   resolveStateFile,
   saveState,
+  updateState,
+  upsertJob,
   writeCancelFlag,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
@@ -318,4 +323,61 @@ test("loadState falls back to defaults when a corrupt state file has no job file
   assert.equal(state.version, 1);
   assert.equal(state.config.stopReviewGate, false);
   assert.equal(warnings.length, 1);
+});
+
+test("a stale snapshot save cannot resurrect a cancelled job", () => {
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-race", status: "running", pid: 4242 });
+
+  // Simulate the cancel-vs-progress race: the progress path captured its
+  // snapshot before cancel landed, then writes the whole file last.
+  const staleSnapshot = loadState(workspace);
+  upsertJob(workspace, { id: "task-race", status: "cancelled", pid: null });
+
+  const staleJob = staleSnapshot.jobs.find((job) => job.id === "task-race");
+  staleJob.phase = "verifying";
+  saveState(workspace, staleSnapshot);
+
+  const finalJob = listJobs(workspace).find((job) => job.id === "task-race");
+  assert.equal(finalJob.status, "cancelled");
+  assert.equal(finalJob.pid ?? null, null);
+});
+
+test("upsertJob refuses to revive a terminal job", () => {
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-terminal", status: "cancelled", pid: null });
+  upsertJob(workspace, { id: "task-terminal", status: "running", pid: 5151, phase: "starting" });
+
+  const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
+  assert.equal(job.status, "cancelled");
+  assert.equal(job.pid ?? null, null);
+});
+
+test("concurrent state updates are serialized by the state lock", () => {
+  const workspace = makeTempDir();
+  updateState(workspace, (state) => {
+    state.config.counter = 0;
+  });
+
+  const workers = 6;
+  const incrementsPerWorker = 5;
+  const script = `
+    import { updateState } from ${JSON.stringify(new URL("../plugins/codex/scripts/lib/state.mjs", import.meta.url).href)};
+    for (let i = 0; i < ${incrementsPerWorker}; i += 1) {
+      updateState(${JSON.stringify(workspace)}, (state) => {
+        state.config.counter = (state.config.counter ?? 0) + 1;
+      });
+    }
+  `;
+  const results = Array.from({ length: workers }, () =>
+    spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: process.env
+    })
+  );
+  for (const result of results) {
+    assert.equal(result.status, 0, result.stderr);
+  }
+
+  assert.equal(loadState(workspace).config.counter, workers * incrementsPerWorker);
 });
