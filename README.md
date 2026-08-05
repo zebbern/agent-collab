@@ -1,4 +1,4 @@
-# multi-collaboration — delegate from Claude Code to other AI coding agents
+# agent-collab — delegate from Claude Code to other AI coding agents
 
 Two plugins in one marketplace: **codex** (a community fork of OpenAI's Codex
 plugin, detailed below) and **cursor** (`/cursor:review`, `/cursor:task`, … —
@@ -51,19 +51,19 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add zebbern/multi-collaboration
+/plugin marketplace add zebbern/agent-collab
 ```
 
 Install the Codex plugin:
 
 ```bash
-/plugin install codex@multi-collaboration
+/plugin install codex@agent-collab
 ```
 
 Or the Cursor plugin (delegates to Cursor's `cursor-agent` CLI; on Windows it runs through WSL since Cursor ships no native Windows CLI build):
 
 ```bash
-/plugin install cursor@multi-collaboration
+/plugin install cursor@agent-collab
 ```
 
 (For the official OpenAI plugin instead, use `/plugin marketplace add openai/codex-plugin-cc`.)
