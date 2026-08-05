@@ -256,3 +256,32 @@ test("setup command can offer Codex install and still points users to codex logi
   assert.match(readme, /\/codex:setup --enable-review-gate/);
   assert.match(readme, /\/codex:setup --disable-review-gate/);
 });
+
+test("SECURITY.md cannot rot: every referenced path exists and the private reporting link is present", () => {
+  const security = fs.readFileSync(path.join(ROOT, "SECURITY.md"), "utf8");
+  assert.match(security, /github\.com\/zebbern\/agent-collab\/security\/advisories\/new/);
+
+  // Every backtick-quoted repo path must resolve; `plugins/*/...` expands to
+  // both plugins. This is the exact decay mode hygiene files die from.
+  const references = [...security.matchAll(/`(plugins\/[^`]+\.mjs)`/g)].map((match) => match[1]);
+  assert.ok(references.length >= 4, `expected several path references, got ${references.length}`);
+  for (const reference of references) {
+    const candidates = reference.includes("*")
+      ? ["codex", "cursor"].map((plugin) => reference.replace("*", plugin))
+      : [reference];
+    for (const candidate of candidates) {
+      assert.ok(fs.existsSync(path.join(ROOT, candidate)), `SECURITY.md references missing file: ${candidate}`);
+    }
+  }
+});
+
+test("the PR template checklist tracks the repo's real gates", () => {
+  const template = fs.readFileSync(path.join(ROOT, ".github", "PULL_REQUEST_TEMPLATE.md"), "utf8");
+  assert.match(template, /npm test/);
+  assert.match(template, /byte-identical/);
+  assert.ok(fs.existsSync(path.join(ROOT, "tests", "chassis-drift.test.mjs")));
+  assert.match(template, /live-fired/);
+  for (const form of ["bug.yml", "feature.yml"]) {
+    assert.ok(fs.existsSync(path.join(ROOT, ".github", "ISSUE_TEMPLATE", form)), `missing issue form ${form}`);
+  }
+});

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in the codex or cursor plugin misbehaves
+labels: [bug]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - codex
+        - cursor
+        - both / marketplace
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Windows version, macOS version, or Linux distro. Bugs here are dominated by platform specifics.
+      placeholder: Windows 11 Home 10.0.26220
+    validations:
+      required: true
+  - type: input
+    id: wsl
+    attributes:
+      label: WSL details (Windows + cursor plugin only)
+      description: Distro and whether cursor-agent lives inside WSL.
+      placeholder: kali-linux, cursor-agent at ~/.local/bin/cursor-agent
+  - type: input
+    id: cli-versions
+    attributes:
+      label: CLI versions
+      description: Output of `codex --version` and/or `cursor-agent --version`, plus your Claude Code version.
+      placeholder: codex-cli 0.146.0, cursor-agent 2026.07.23, Claude Code 2.x
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: What happened, and how to reproduce it
+      description: The command you ran (e.g. `/codex:task ...`), what you expected, and what you got. `/codex:doctor` or `/cursor:doctor` output is often the fastest diagnostic.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: The job log path is shown in `/codex:status` / `/cursor:status`. Redact anything private.
+      render: text

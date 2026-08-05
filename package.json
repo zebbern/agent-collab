@@ -6,7 +6,7 @@
   "description": "Community fork of the OpenAI Codex plugin for Claude Code.",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "bump-version": "node scripts/bump-version.mjs",

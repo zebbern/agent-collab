@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose an improvement to the codex or cursor plugin
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - codex
+        - cursor
+        - both / marketplace
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: The workflow that hurts today, not just the feature name.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: What might it look like?
+      description: A command sketch, flag, or example output — optional but helpful.
