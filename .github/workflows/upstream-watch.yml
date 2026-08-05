@@ -1,0 +1,76 @@
+name: Upstream watch
+
+# The codex plugin is a fork of openai/codex-plugin-cc pinned at v1.0.6.
+# Upstream keeps moving and does not carry this fork's fixes, so drift is
+# silent. This weekly check counts upstream commits past the fork point and
+# keeps a single labeled issue up to date so rebasing is a choice, not a
+# surprise.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Compare against upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK_POINT: db52e28f4d9ded852ab3942cea316258ae4ef346 # upstream v1.0.6
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/openai/codex-plugin-cc.git
+          git fetch --quiet upstream main
+
+          HEAD_SHA=$(git rev-parse upstream/main)
+          COUNT=$(git rev-list --count "$FORK_POINT..upstream/main")
+          echo "Upstream is $COUNT commit(s) past the fork point (HEAD $HEAD_SHA)."
+          if [ "$COUNT" -eq 0 ]; then
+            exit 0
+          fi
+
+          SHORT=${HEAD_SHA:0:7}
+          TITLE="Upstream codex-plugin-cc: $COUNT commits past the fork point (through $SHORT)"
+
+          {
+            echo "Upstream [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) has moved **$COUNT commit(s)** past this fork's base (\`${FORK_POINT:0:7}\`, v1.0.6)."
+            echo
+            echo "### Latest upstream commits"
+            echo '```'
+            git log --oneline --no-decorate -20 "$FORK_POINT..upstream/main"
+            echo '```'
+            echo
+            echo "### Files upstream touched"
+            echo '```'
+            git diff --stat=110 "$FORK_POINT" upstream/main -- ':!tests' | tail -25
+            echo '```'
+            echo
+            echo "Review whether any of it should be rebased into \`plugins/codex\`. This issue is updated automatically by the \`upstream-watch\` workflow."
+          } > body.md
+
+          EXISTING=$(gh issue list --label upstream-sync --state open --json number,title --jq '.[0] // empty')
+          if [ -z "$EXISTING" ]; then
+            gh issue create --label upstream-sync --title "$TITLE" --body-file body.md
+            exit 0
+          fi
+
+          EXISTING_NUMBER=$(echo "$EXISTING" | jq -r '.number')
+          EXISTING_TITLE=$(echo "$EXISTING" | jq -r '.title')
+          if [ "$EXISTING_TITLE" = "$TITLE" ]; then
+            echo "Open issue #$EXISTING_NUMBER already reflects $SHORT."
+            exit 0
+          fi
+          gh issue edit "$EXISTING_NUMBER" --title "$TITLE" --body-file body.md
