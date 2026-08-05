@@ -12,8 +12,10 @@ jobs:
   ci:
     name: CI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # The suite spawns real processes and takes ~30 minutes on Windows
-    # (tests/runtime.test.mjs alone is ~15), so the budget is generous.
+    # The suite spawns real processes and is slow on Windows. The former
+    # 15-minute tests/runtime.test.mjs is split into runtime-core, runtime-task,
+    # and runtime-broker (~4-5 minutes of test time each) so the test runner's
+    # per-file parallelism absorbs most of it, but the budget stays generous.
     timeout-minutes: 45
 
     strategy:
