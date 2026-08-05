@@ -1270,16 +1270,20 @@ export async function handleCancel(argv, dependencies = {}) {
     );
   }
 
-  const expectedRootIdentity = existing.processIdentity ?? null;
-  const ownershipCaptureFailed = existing.ownershipCaptureFailed === true;
+  // Bind ownership proof from the merged record, not the job file alone:
+  // progress updates rewrite the file with unlocked read-modify-write, so a
+  // write that sampled the file before ownership landed can clobber those
+  // fields — while the lock-serialized state index still carries them.
+  const expectedRootIdentity = record.processIdentity ?? null;
+  const ownershipCaptureFailed = record.ownershipCaptureFailed === true;
   writeCancelFlag(workspaceRoot, job.id);
   let cleanupOutcome = null;
   try {
     cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
       expectedRootIdentity,
-      ownershipSnapshot: existing.ownershipSnapshot ?? null,
+      ownershipSnapshot: record.ownershipSnapshot ?? null,
       requireVerifiedOwnership: ownershipCaptureFailed,
-      priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
+      priorCleanupDegraded: record.cleanupOutcome?.degraded === true
     });
   } catch (error) {
     // A partially resistant tree is not fatal: sandboxed codex.exe children

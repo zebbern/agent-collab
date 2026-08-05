@@ -357,7 +357,8 @@ async function executeReviewRun(request) {
     prompt,
     model: request.model,
     write: false,
-    onProgress: request.onProgress
+    onProgress: request.onProgress,
+    onWslAgentPid: request.onWslAgentPid
   });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
@@ -551,6 +552,26 @@ function requireTaskRequest(prompt, resumeChatId) {
   }
 }
 
+function persistWslAgentIdentity(workspaceRoot, jobId) {
+  return (wslAgentPid, wslAgentStartTime) => {
+    // Persist the Linux-side agent (pid, starttime) as soon as it is known
+    // so a concurrent cancel can reap the agent inside the distro and prove
+    // it is signalling the process we spawned, not a reused PID.
+    try {
+      const current = readStoredJob(workspaceRoot, jobId) ?? {};
+      writeJobFile(workspaceRoot, jobId, {
+        ...current,
+        wslAgentPid,
+        wslAgentStartTime: wslAgentStartTime ?? null,
+        transport: "wsl"
+      });
+      upsertJob(workspaceRoot, { id: jobId, wslAgentPid, wslAgentStartTime: wslAgentStartTime ?? null });
+    } catch {
+      // Best-effort persistence; the job continues either way.
+    }
+  };
+}
+
 async function runForegroundCommand(job, runner, options = {}) {
   const { logFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
@@ -683,7 +704,8 @@ async function handleReviewCommand(argv, config) {
         model: normalizeRequestedModel(options.model),
         focusText,
         reviewName: config.reviewName,
-        onProgress: progress
+        onProgress: progress,
+        onWslAgentPid: persistWslAgentIdentity(workspaceRoot, job.id)
       }),
     { json: options.json }
   );
@@ -738,7 +760,8 @@ async function handleTask(argv) {
         write,
         resumeChatId,
         jobId: job.id,
-        onProgress: progress
+        onProgress: progress,
+        onWslAgentPid: persistWslAgentIdentity(workspaceRoot, job.id)
       }),
     { json: options.json }
   );
@@ -818,24 +841,7 @@ export async function handleTaskWorker(argv, dependencies = {}) {
       executeTaskRun({
         ...request,
         onProgress: progress,
-        onWslAgentPid: (wslAgentPid, wslAgentStartTime) => {
-          // Persist the Linux-side agent (pid, starttime) as soon as it is
-          // known so a concurrent cancel can reap the agent inside the distro
-          // and prove it is signalling the process we spawned, not a reused
-          // PID.
-          try {
-            const current = readStoredJob(workspaceRoot, options["job-id"]) ?? {};
-            writeJobFile(workspaceRoot, options["job-id"], {
-              ...current,
-              wslAgentPid,
-              wslAgentStartTime: wslAgentStartTime ?? null,
-              transport: "wsl"
-            });
-            upsertJob(workspaceRoot, { id: options["job-id"], wslAgentPid, wslAgentStartTime: wslAgentStartTime ?? null });
-          } catch {
-            // Best-effort persistence; the job continues either way.
-          }
-        }
+        onWslAgentPid: persistWslAgentIdentity(workspaceRoot, options["job-id"])
       }),
     { logFile }
   );
@@ -943,8 +949,12 @@ export async function handleCancel(argv, dependencies = {}) {
     }
   }
 
-  const expectedRootIdentity = existing.processIdentity ?? null;
-  const ownershipCaptureFailed = existing.ownershipCaptureFailed === true;
+  // Bind ownership proof from the merged record, not the job file alone:
+  // progress updates rewrite the file with unlocked read-modify-write, so a
+  // write that sampled the file before ownership landed can clobber those
+  // fields — while the lock-serialized state index still carries them.
+  const expectedRootIdentity = record.processIdentity ?? null;
+  const ownershipCaptureFailed = record.ownershipCaptureFailed === true;
   writeCancelFlag(workspaceRoot, job.id);
 
   // WSL transport: reap the Linux-side agent FIRST. taskkill cannot terminate
@@ -985,9 +995,9 @@ export async function handleCancel(argv, dependencies = {}) {
   try {
     cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
       expectedRootIdentity,
-      ownershipSnapshot: existing.ownershipSnapshot ?? null,
+      ownershipSnapshot: record.ownershipSnapshot ?? null,
       requireVerifiedOwnership: ownershipCaptureFailed,
-      priorCleanupDegraded: existing.cleanupOutcome?.degraded === true
+      priorCleanupDegraded: record.cleanupOutcome?.degraded === true
     });
   } catch (error) {
     // A resistant tree (e.g. a not-yet-collapsed wsl.exe relay) is not fatal:

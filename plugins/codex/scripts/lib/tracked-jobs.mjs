@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { captureProcessOwnership, getOwnWindowsProcessIdentity, getProcessIdentity } from "./process.mjs";
 import { hasCancelFlag, isTerminalJobStatus, listJobs, readJobFile, removeCancelFlag, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
@@ -154,9 +155,46 @@ function createJobCancelledError(jobId) {
   return error;
 }
 
+/**
+ * Ownership proof for the process that is about to run a job in-process:
+ * Unix start-time identity where available, (pid, CreationDate) on win32,
+ * plus a best-effort tree snapshot. Cancel refuses to signal any PID it
+ * cannot prove, so a record without these fields is uncancellable.
+ */
+export function captureRunnerOwnership(pid = process.pid) {
+  let ownership;
+  try {
+    const processIdentity =
+      getProcessIdentity(pid) ??
+      (process.platform === "win32" ? getOwnWindowsProcessIdentity(pid) : null);
+    ownership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
+  } catch {
+    ownership = { ownershipCaptureFailed: true };
+  }
+  if (ownership.processIdentity) {
+    // Snapshot only alongside a successful identity capture: a failed capture
+    // must leave no partial ownership data behind.
+    try {
+      const ownershipSnapshot = captureProcessOwnership(pid);
+      if (ownershipSnapshot) {
+        ownership = { ...ownership, ownershipSnapshot };
+      }
+    } catch {
+      // Snapshot capture is best-effort; identity above still gates cancel.
+    }
+  }
+  return ownership;
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
+  // Detached workers capture and spread their own ownership into the job;
+  // every other caller runs the job in this very process, so the proof is
+  // captured here — otherwise foreground jobs are uncancellable by design.
+  const ownership =
+    job.processIdentity || job.ownershipCaptureFailed === true ? {} : captureRunnerOwnership();
   const runningRecord = {
     ...job,
+    ...ownership,
     status: "running",
     startedAt: nowIso(),
     phase: "starting",

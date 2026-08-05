@@ -160,6 +160,10 @@ test("task stores the init-resolved session id, model, and native transport", ()
   assert.equal(storedJob.status, "completed");
   assert.equal(storedJob.threadId, "sess-fake-1");
   assert.equal(storedJob.result.threadId, "sess-fake-1");
+  // Foreground runs must carry the runner's ownership proof — a record
+  // without it is uncancellable (cancel refuses unproven PIDs).
+  assert.equal(typeof storedJob.processIdentity, "string", JSON.stringify(storedJob));
+  assert.match(storedJob.processIdentity, /@/);
   // The stored model comes from the stream's init event, not the request.
   assert.equal(storedJob.result.model, "composer-2-fake");
   assert.equal(storedJob.result.transport, "native");
@@ -371,6 +375,10 @@ test("review runs read-only and renders structured findings", () => {
   assert.equal(job.jobClass, "review");
   assert.equal(storedJob.threadId, "sess-fake-1");
   assert.equal(storedJob.result.result.verdict, "needs-attention");
+  // In-process review runs must carry the runner's ownership proof — a
+  // record without it is uncancellable (cancel refuses unproven PIDs).
+  assert.equal(typeof storedJob.processIdentity, "string", JSON.stringify(storedJob));
+  assert.match(storedJob.processIdentity, /@/);
 });
 
 test("adversarial review passes focus text into the prompt", () => {
@@ -477,6 +485,79 @@ test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {
   const staleJob = state.jobs.find((job) => job.id === "task-stale");
   assert.notEqual(staleJob.status, "cancelled");
   assert.equal(staleJob.phase, "cleanup-pending");
+});
+
+test("cancel stops an in-process review and survives a clobbered job file", async (t) => {
+  const repo = makeReviewRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "slow");
+
+  // Claude backgrounds foreground commands with a detached shell; emulate
+  // that shape: the review runs in-process in this child via
+  // runForegroundCommand/runTrackedJob, never through a task-worker.
+  const child = spawn("node", [SCRIPT, "review", "--wait"], {
+    cwd: repo,
+    env: withTestBinaryOverride(binDir),
+    stdio: "ignore"
+  });
+  t.after(() => {
+    try {
+      child.kill();
+    } catch {
+      // Already gone.
+    }
+  });
+
+  const stateDir = resolveStateDir(repo);
+  const runningJob = await waitFor(() => {
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+      const job = state.jobs.find((candidate) => candidate.jobClass === "review");
+      return job?.status === "running" && Number.isFinite(job.pid) && job.threadId && job.processIdentity
+        ? job
+        : null;
+    } catch {
+      return null;
+    }
+  }, { timeoutMs: 30000 });
+
+  // In-process runs must persist the runner's ownership into BOTH stores.
+  assert.match(runningJob.processIdentity, /@/);
+  const jobFile = path.join(stateDir, "jobs", `${runningJob.id}.json`);
+  const storedRunning = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.match(storedRunning.processIdentity ?? "", /@/, JSON.stringify(storedRunning));
+
+  // Simulate the progress-updater race clobbering the job file: ownership
+  // fields vanish from the file while the lock-serialized index keeps them.
+  // Cancel must fall back to the index instead of fail-closing.
+  const {
+    processIdentity: _clobberedIdentity,
+    ownershipSnapshot: _clobberedSnapshot,
+    ownershipCaptureFailed: _clobberedCaptureFailed,
+    ...clobbered
+  } = storedRunning;
+  fs.writeFileSync(jobFile, `${JSON.stringify(clobbered, null, 2)}\n`);
+
+  const cancelResult = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], {
+    cwd: repo,
+    env: withTestBinaryOverride(binDir)
+  });
+  assert.equal(cancelResult.status, 0, cancelResult.stderr);
+  assert.equal(JSON.parse(cancelResult.stdout).status, "cancelled");
+
+  await waitFor(() => {
+    try {
+      process.kill(runningJob.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const cancelled = state.jobs.find((job) => job.id === runningJob.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.pid, null);
 });
 
 test("cancel stops a slow background task and marks it cancelled", async () => {

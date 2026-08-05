@@ -547,6 +547,10 @@ test("task persists run telemetry and status renders progress signals", () => {
   const storedJob = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${job.id}.json`), "utf8"));
 
   assert.equal(storedJob.status, "completed");
+  // Foreground runs must carry the runner's ownership proof — a record
+  // without it is uncancellable (cancel refuses unproven PIDs).
+  assert.equal(typeof storedJob.processIdentity, "string", JSON.stringify(storedJob));
+  assert.match(storedJob.processIdentity, /@/);
   assert.equal(storedJob.result.fileChanges.length, 1);
   assert.equal(storedJob.result.fileChanges[0].changes[0].path, "src/app.js");
   assert.ok(Number.isFinite(Date.parse(storedJob.result.fileChanges[0].completedAt)));
