@@ -108,7 +108,7 @@ Same review quality as running `/review` inside Codex directly. Use `--base <ref
 
 #### `/codex:adversarial-review`
 
-Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. Same target selection as `/codex:review`, plus free-form focus text:
+Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. It uses the same review target selection as `/codex:review` (including `--base <ref>`), plus free-form focus text:
 
 ```bash
 /codex:adversarial-review --base main challenge whether this caching design is right
@@ -117,20 +117,34 @@ Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. Same tar
 
 #### `/codex:rescue`
 
-Delegates investigation or fixes through the `codex:codex-rescue` subagent:
+Delegates investigation or fixes through the `codex:codex-rescue` subagent — investigate a bug, try a fix, continue a previous Codex task, or take a cheaper pass with a smaller model:
 
 ```bash
 /codex:rescue investigate why the tests started failing
 /codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model spark fix the issue quickly        # spark → gpt-5.3-codex-spark
+/codex:rescue --model spark fix the issue quickly
 /codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky test
 ```
 
 You can also just ask: *"Ask Codex to redesign the database connection to be more resilient."*
 
+**Notes:**
+
+- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
+- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
+- follow-up rescue requests can continue the latest Codex task in the repo
+
 #### `/codex:transfer`
 
 Creates a persistent Codex thread from the current Claude Code session and prints `codex resume <session-id>`. The `SessionStart` hook supplies the transcript path automatically; `--source <path>` overrides it (must live under `~/.claude/projects`).
+
+### `/codex:setup`
+
+Checks whether Codex is installed and authenticated. If Codex is missing and npm is available, it can offer to install Codex for you. If Codex is installed but not logged in yet, run:
+
+```bash
+!codex login
+```
 
 #### Review gate (optional, off by default)
 
