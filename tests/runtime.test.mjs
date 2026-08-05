@@ -4830,6 +4830,13 @@ test("commands lazily start and reuse one shared app-server after first use", as
 });
 
 test("shared broker clears a disconnected stream after its request rejects", async (t) => {
+  if (process.platform === "win32") {
+    // Without a shared broker both clients get private app-servers, so the
+    // stream-clearing contract under test is never exercised here — and the
+    // spawned cmd.exe -> codex.cmd stdio chain is unreliable on CI runners.
+    t.skip("Unix broker sockets are required for this contract.");
+    return;
+  }
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
