@@ -2039,6 +2039,31 @@ test("setup reports not ready when app-server config read fails", () => {
   assert.match(payload.auth.detail, /config\/read failed for cwd/);
 });
 
+test("setup hints at a stale Codex CLI when config parsing hits version skew", () => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "config-read-version-skew");
+
+  const result = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: ROOT,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ready, false);
+  assert.match(payload.auth.detail, /unknown variant `default`/);
+  assert.ok(payload.nextSteps.some((step) => /Codex CLI looks outdated/.test(step)), JSON.stringify(payload.nextSteps));
+
+  const rendered = run("node", [SCRIPT, "setup"], {
+    cwd: ROOT,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.match(rendered.stdout, /- The Codex CLI looks outdated for this configuration or backend\./);
+  assert.match(rendered.stdout, /npm install -g @openai\/codex/);
+});
+
 test("review renders a no-findings result from app-server review/start", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

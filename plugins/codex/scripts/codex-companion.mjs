@@ -55,6 +55,7 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
+  buildStaleCodexCliHint,
   renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
@@ -212,6 +213,10 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   if (codexStatus.available && !authStatus.loggedIn && authStatus.requiresOpenaiAuth) {
     nextSteps.push("Run `!codex login`.");
     nextSteps.push("If browser login is blocked, retry with `!codex login --device-auth` or `!codex login --with-api-key`.");
+  }
+  const staleCliHint = buildStaleCodexCliHint({ codex: codexStatus, auth: authStatus });
+  if (staleCliHint) {
+    nextSteps.push(staleCliHint);
   }
   if (!config.stopReviewGate) {
     nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
