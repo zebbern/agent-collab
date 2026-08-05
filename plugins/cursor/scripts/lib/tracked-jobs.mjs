@@ -52,7 +52,8 @@ export function appendLogBlock(logFile, title, body) {
 
 export function createJobLogFile(workspaceRoot, jobId, title) {
   const logFile = resolveJobLogFile(workspaceRoot, jobId);
-  fs.writeFileSync(logFile, "", "utf8");
+  // Logs carry the same prompts and results as job records; keep them private.
+  fs.writeFileSync(logFile, "", { encoding: "utf8", mode: 0o600 });
   if (title) {
     appendLogLine(logFile, `Starting ${title}.`);
   }
@@ -132,7 +133,7 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     const event = normalizeProgressEvent(eventOrMessage);
     const stderrMessage = event.stderrMessage ?? event.message;
     if (stderr && stderrMessage) {
-      process.stderr.write(`[cursor] ${stderrMessage}\n`);
+      process.stderr.write(`[codex] ${stderrMessage}\n`);
     }
     appendLogLine(logFile, event.message);
     appendLogBlock(logFile, event.logTitle, event.logBody);

@@ -7,7 +7,48 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const ENFORCE_POSIX_MODES = process.platform !== "win32";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
+
+// Validate — and optionally create — a directory that must stay private to
+// this user. Job records and logs carry prompts and results, so a symlinked
+// or another user's directory in the path must be refused, not followed or
+// trusted. This is the same private-dir doctrine the broker registry uses.
+//
+// Creation goes through a NON-recursive mkdir so an existing symlink at the
+// leaf fails EEXIST instead of being followed — no write-through. A residual
+// TOCTOU window (a swap between this check and the caller's next use) is
+// accepted for this threat model rather than plumbing O_NOFOLLOW dir fds
+// everywhere; the ownership + symlink refusal closes the pre-planted cases.
+function ensurePrivateDir(dir, { create }) {
+  let stat;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+    if (!create) {
+      return false;
+    }
+    fs.mkdirSync(dir, { mode: 0o700 });
+    return true;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`State path ${dir} is not a private directory; refusing to use it.`);
+  }
+  if (ENFORCE_POSIX_MODES) {
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error(`State path ${dir} is owned by another user; refusing to use it.`);
+    }
+    if ((stat.mode & 0o777) !== 0o700) {
+      // Tighten a loose directory we own (e.g. one created by an older
+      // version) instead of only protecting fresh installs.
+      fs.chmodSync(dir, 0o700);
+    }
+  }
+  return true;
+}
 const STATE_FILE_NAME = "state.json";
 const STATE_LOCK_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
@@ -31,7 +72,7 @@ function acquireStateLock(cwd) {
   const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS;
   for (;;) {
     try {
-      fs.writeFileSync(lockFile, String(process.pid), { flag: "wx" });
+      fs.writeFileSync(lockFile, String(process.pid), { flag: "wx", mode: 0o600 });
       return lockFile;
     } catch (error) {
       const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
@@ -110,9 +151,7 @@ export function resolveStateDir(cwd) {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
-  return path.join(stateRoot, `${slug}-${hash}`);
+  return path.join(resolveStateRoot(), `${slug}-${hash}`);
 }
 
 export function resolveStateFile(cwd) {
@@ -123,15 +162,36 @@ export function resolveJobsDir(cwd) {
   return path.join(resolveStateDir(cwd), JOBS_DIR_NAME);
 }
 
+function resolveStateRoot() {
+  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
+  return pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
+}
+
 export function ensureStateDir(cwd) {
-  fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
+  const stateDir = resolveStateDir(cwd);
+  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
+  // Build the tree from the root down, validating each level before creating
+  // the next. The root is created recursively (its parents — %TEMP% or the
+  // harness-provided plugin-data dir — are out of our threat model), then
+  // validated so a squatted or symlinked root is refused before anything is
+  // written beneath it. The leaf and jobs dirs are created non-recursively so
+  // a pre-planted symlink at either fails EEXIST rather than being followed.
+  fs.mkdirSync(resolveStateRoot(), { recursive: true, mode: 0o700 });
+  ensurePrivateDir(resolveStateRoot(), { create: false });
+  ensurePrivateDir(stateDir, { create: true });
+  ensurePrivateDir(jobsDir, { create: true });
 }
 
 export function loadState(cwd) {
-  const stateFile = resolveStateFile(cwd);
+  const stateDir = resolveStateDir(cwd);
+  const stateFile = path.join(stateDir, STATE_FILE_NAME);
   if (!fs.existsSync(stateFile)) {
     return defaultState();
   }
+  // Read paths must validate too: a pre-planted symlinked or foreign-owned
+  // state dir would otherwise feed attacker-controlled state.json to readers
+  // (listJobs/getConfig/status/result) that never call ensureStateDir.
+  ensurePrivateDir(stateDir, { create: false });
 
   try {
     const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
@@ -348,7 +408,7 @@ export function readJobFile(jobFile) {
 export function writeCancelFlag(cwd, jobId) {
   const cancelFlag = resolveCancelFlag(cwd, jobId);
   try {
-    fs.writeFileSync(cancelFlag, "", { flag: "wx" });
+    fs.writeFileSync(cancelFlag, "", { flag: "wx", mode: 0o600 });
   } catch (error) {
     if (error?.code !== "EEXIST") {
       throw error;

@@ -22,6 +22,7 @@ import {
   writeCancelFlag,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
+import { createJobLogFile } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -357,6 +358,84 @@ test("upsertJob refuses to revive a terminal job", () => {
   const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
   assert.equal(job.status, "cancelled");
   assert.equal(job.pid ?? null, null);
+});
+
+test("the state dir is private: 0o700 dir, 0o600 lock/cancel/log", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX modes are required for this contract.");
+    return;
+  }
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-private", status: "completed", pid: null });
+  const stateDir = resolveStateDir(workspace);
+  assert.equal(fs.statSync(stateDir).mode & 0o777, 0o700);
+
+  const flag = writeCancelFlag(workspace, "task-private");
+  assert.equal(fs.statSync(flag).mode & 0o777, 0o600);
+
+  const logFile = createJobLogFile(workspace, "task-private", "Title");
+  assert.equal(fs.statSync(logFile).mode & 0o777, 0o600);
+
+  // A loose pre-existing dir from an older version is tightened on touch.
+  fs.chmodSync(stateDir, 0o755);
+  upsertJob(workspace, { id: "task-private-2", status: "completed", pid: null });
+  assert.equal(fs.statSync(stateDir).mode & 0o777, 0o700);
+});
+
+test("a symlinked state dir is refused on both write and read, without write-through", (t) => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  fs.mkdirSync(path.dirname(stateDir), { recursive: true, mode: 0o700 });
+  const elsewhere = makeTempDir();
+  try {
+    fs.symlinkSync(elsewhere, stateDir, "dir");
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip("Symlink creation requires elevated privileges on this platform.");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => upsertJob(workspace, { id: "task-redirected", status: "queued", pid: null }),
+    /not a private directory/
+  );
+  // The symlink target must gain no jobs/ tree — the refusal comes before any
+  // create, so nothing was written through the link.
+  assert.equal(fs.existsSync(path.join(elsewhere, "jobs")), false);
+  // Readers refuse the same way instead of trusting redirected state.
+  fs.writeFileSync(path.join(elsewhere, "state.json"), '{"jobs":[{"id":"planted"}]}');
+  assert.throws(() => loadState(workspace), /not a private directory/);
+});
+
+test("a state root owned by another user is refused (squat resistance)", (t) => {
+  if (process.platform === "win32" || typeof process.getuid !== "function") {
+    t.skip("POSIX ownership is required for this contract.");
+    return;
+  }
+  if (process.getuid() !== 0) {
+    t.skip("Simulating a foreign-owned root requires chown, i.e. root.");
+    return;
+  }
+  // Isolate to a private plugin-data root so chowning it to another uid never
+  // poisons the shared /tmp fallback that the other tests in this file use.
+  const workspace = makeTempDir();
+  const pluginData = makeTempDir();
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  try {
+    const stateRoot = path.join(pluginData, "state");
+    fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    fs.chownSync(stateRoot, 65534, 65534); // nobody
+    assert.throws(() => ensureStateDir(workspace), /owned by another user/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previous;
+    }
+  }
 });
 
 test("a corrupt state.json is quarantined and the rebuilt index is persisted", () => {

@@ -52,7 +52,8 @@ export function appendLogBlock(logFile, title, body) {
 
 export function createJobLogFile(workspaceRoot, jobId, title) {
   const logFile = resolveJobLogFile(workspaceRoot, jobId);
-  fs.writeFileSync(logFile, "", "utf8");
+  // Logs carry the same prompts and results as job records; keep them private.
+  fs.writeFileSync(logFile, "", { encoding: "utf8", mode: 0o600 });
   if (title) {
     appendLogLine(logFile, `Starting ${title}.`);
   }
