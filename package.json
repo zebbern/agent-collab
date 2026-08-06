@@ -15,7 +15,8 @@
     "build": "tsc -p tsconfig.app-server.json",
     "sync-chassis": "node scripts/sync-chassis.mjs",
     "reap-test-residue": "node scripts/reap-test-residue.mjs",
-    "test": "node scripts/run-tests.mjs"
+    "test": "node scripts/run-tests.mjs",
+    "verify": "node scripts/verify.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
