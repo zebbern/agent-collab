@@ -12,6 +12,7 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import {
   buildLivenessProbe,
+  buildPluginInstallChecks,
   buildProcessTableGuard,
   buildStartupOverheadCheck,
   buildStateHygieneChecks,
@@ -182,6 +183,133 @@ test("the startup-overhead check summarizes per transport and stays informationa
   assert.ok(check.details.some((line) => /wsl: n=1, median 5000ms/.test(line)), JSON.stringify(check.details));
 });
 
+// Fake <configDir>/plugins layout matching the real installer:
+// installed_plugins.json maps "<name>@<marketplace>" keys to install-record
+// arrays, and cached copies live under cache/<marketplace>/<name>/<version>/.
+function writePluginRegistry(pluginsDir, plugins) {
+  fs.mkdirSync(pluginsDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify({ version: 2, plugins }));
+}
+
+test("plugin install checks flag a namespace collision and a stale cached copy", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [{ scope: "user", version: "1.0.6" }],
+    "codex@official-marketplace": [{ scope: "user", version: "1.0.2" }],
+    "unrelated@agent-collab": [{ scope: "user", version: "0.1.0" }]
+  });
+  // 1.0.6 is registered; 1.0.5 is residue an update left behind. The second
+  // marketplace has no cache dir at all, which is not a finding.
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6"), { recursive: true });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.5"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+
+  assert.equal(byId.get("plugin-name-collision").status, "warning");
+  assert.match(byId.get("plugin-name-collision").message, /\/codex:\*/);
+  assert.deepEqual(byId.get("plugin-name-collision").details, ["codex@agent-collab", "codex@official-marketplace"]);
+  assert.equal(byId.get("plugin-cache-stale").status, "warning");
+  assert.match(byId.get("plugin-cache-stale").details.join(" "), /1\.0\.5/);
+  assert.doesNotMatch(byId.get("plugin-cache-stale").details.join(" "), /1\.0\.6/);
+});
+
+test("a single-marketplace install with a fully registered cache is healthy", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  // Two install records (user + project scope): both versions are
+  // legitimate, so neither cached copy may read as stale.
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [
+      { scope: "user", version: "1.0.6" },
+      { scope: "project", version: "1.0.5" }
+    ]
+  });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6"), { recursive: true });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.5"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  assert.equal(report.overallStatus, "ok");
+  assert.equal(report.issueCount, 0);
+  assert.match(report.checks.find((check) => check.id === "plugin-name-collision").message, /codex@agent-collab/);
+});
+
+test("a missing plugin registry reads as not-installed, never a failure", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  assert.equal(report.overallStatus, "ok");
+  assert.match(
+    report.checks.find((check) => check.id === "plugin-name-collision").message,
+    /not installed via a marketplace/
+  );
+});
+
+test("a malformed plugin registry degrades to a warning instead of crashing doctor", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  fs.mkdirSync(pluginsDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginsDir, "installed_plugins.json"), "{not json");
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+
+  assert.equal(byId.get("plugin-name-collision").status, "warning");
+  assert.match(byId.get("plugin-name-collision").message, /installs cannot be audited/);
+  // Unknown is not healthy: an unauditable cache is a warning, not a pass.
+  assert.equal(byId.get("plugin-cache-stale").status, "warning");
+  assert.match(byId.get("plugin-cache-stale").message, /cannot be audited/);
+  // Described, not crashed: a broken registry is a warning, never an error.
+  assert.equal(report.overallStatus, "warning");
+});
+
+test("an unreadable plugin registry is a warning, never absence", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  // A directory where the registry file should be: readFileSync fails with a
+  // non-ENOENT error (EISDIR), the class that must not read as "not installed".
+  fs.mkdirSync(path.join(pluginsDir, "installed_plugins.json"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+
+  assert.equal(byId.get("plugin-name-collision").status, "warning");
+  assert.match(byId.get("plugin-name-collision").message, /installs cannot be audited/);
+  assert.equal(byId.get("plugin-cache-stale").status, "warning");
+});
+
+test("cache residue from an uninstalled marketplace is still found", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  // The registry no longer mentions gone-marketplace at all (uninstalled),
+  // but its cached copy is still on disk — exactly the residue to surface.
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [{ scope: "user", version: "1.0.6" }]
+  });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6"), { recursive: true });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "gone-marketplace", "codex", "1.0.1"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const stale = report.checks.find((check) => check.id === "plugin-cache-stale");
+
+  assert.equal(stale.status, "warning");
+  assert.match(stale.details.join(" "), /gone-marketplace/);
+  assert.doesNotMatch(stale.details.join(" "), /1\.0\.6/);
+});
+
+test("a registry entry with no readable versions makes its cache unauditable, not stale", async () => {
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  // Records exist but carry no usable version strings: declaring every cached
+  // copy stale (and deletable) on that evidence would overclaim.
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [{ scope: "user" }, { scope: "project", version: 42 }]
+  });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const stale = report.checks.find((check) => check.id === "plugin-cache-stale");
+
+  assert.equal(stale.status, "warning");
+  assert.match(stale.message, /could not be audited/);
+  assert.match(stale.details.join(" "), /no readable versions/);
+  assert.doesNotMatch(stale.message, /not recorded in the plugin registry/);
+});
+
 test("state hygiene checks are all ok for a clean workspace", async () => {
   const workspace = makeTempDir();
   upsertJob(workspace, { id: "task-done", status: "completed", pid: null });
@@ -208,7 +336,9 @@ test("doctor --json reports a healthy environment against the fake codex", () =>
 
   const result = run("node", [SCRIPT, "doctor", "--json"], {
     cwd: repo,
-    env: buildEnv(binDir)
+    // Point the install checks at an empty config dir so the report stays
+    // hermetic no matter what plugins the host machine really has installed.
+    env: { ...buildEnv(binDir), CLAUDE_CONFIG_DIR: makeTempDir() }
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -216,7 +346,15 @@ test("doctor --json reports a healthy environment against the fake codex", () =>
   assert.equal(payload.schemaVersion, 1);
   assert.equal(payload.overallStatus, "ok", result.stdout);
   const ids = payload.checks.map((check) => check.id);
-  for (const expected of ["codex-cli", "codex-auth", "codex-cli-freshness", "broker-residue", "state-lock"]) {
+  for (const expected of [
+    "codex-cli",
+    "codex-auth",
+    "codex-cli-freshness",
+    "broker-residue",
+    "plugin-name-collision",
+    "plugin-cache-stale",
+    "state-lock"
+  ]) {
     assert.ok(ids.includes(expected), `missing check ${expected}`);
   }
 });

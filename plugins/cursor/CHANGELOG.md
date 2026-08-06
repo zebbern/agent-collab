@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `/cursor:doctor` gained the same installation-hygiene checks as the codex doctor: `/cursor:*` command-namespace collision detection across installed marketplaces, and a stale plugin-cache audit that also finds residue from uninstalled marketplaces — with unreadable registry/cache state reported as unauditable, never as healthy.
+
 ## 0.4.0
 
 - Added `/cursor:doctor`: a read-only health report covering cursor-agent availability (WSL-aware), auth, and the same state-hygiene checks as the codex doctor, plus a spawn→init startup-overhead summary.

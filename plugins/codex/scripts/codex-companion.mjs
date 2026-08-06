@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -65,6 +66,7 @@ import {
 } from "./lib/job-control.mjs";
 import {
   buildLivenessProbe,
+  buildPluginInstallChecks,
   buildProcessTableGuard,
   buildStartupOverheadCheck,
   buildStateHygieneChecks,
@@ -354,6 +356,10 @@ async function handleDoctor(argv) {
         };
       }
     },
+    ...buildPluginInstallChecks({
+      pluginName: "codex",
+      pluginsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "plugins")
+    }),
     ...buildStateHygieneChecks({
       stateDir: resolveStateDir(workspaceRoot),
       jobs: listJobs(workspaceRoot),

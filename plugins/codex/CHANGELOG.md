@@ -5,6 +5,10 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## Unreleased
+
+- `/codex:doctor` now audits the installation itself. `plugin-name-collision`: this fork ships a plugin literally named `codex`, so installed alongside the official OpenAI plugin both claim the `/codex:*` commands — the check names every claimant and says to uninstall all but one. `plugin-cache-stale`: cached plugin copies no install records — including residue from uninstalled marketplaces — are surfaced as verify-before-deleting warnings; an unreadable registry or cache reports as unauditable, never as healthy.
+
 ## 1.0.6+fork.4
 
 - Added `/codex:doctor`: a read-only health report covering CLI availability and version freshness, auth, registered-broker residue (report-only), and state hygiene (cleanup-pending jobs, likely-dead workers, stale locks, quarantined corrupt state, orphaned job files), each with inline remediation. Warnings never fail the command.
