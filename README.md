@@ -14,6 +14,7 @@ Run Codex and Cursor as background workers inside Claude Code — reviews, tasks
 [Quick start](#quick-start) •
 [Codex plugin](#codex-plugin) •
 [Cursor plugin](#cursor-plugin) •
+[Ambient delegation](#ambient-delegation) •
 [How it works](#how-it-works) •
 [Development](#development) •
 [License](#license--attribution)
@@ -249,6 +250,20 @@ Cursor defaults to **`auto`** (its server-side router). Pin one per invocation w
 - Cancel **proves ownership before killing anything**: workers persist a process identity at start (Unix start-time identity, or `(pid, CreationDate)` on Windows), a stale or reused PID is never killed, and a job with no recorded proof fails closed as `cleanup-pending`.
 - On WSL, cancel reaps the Linux-side agent **inside the distro first** (verifying `/proc` cmdline before signalling, TERM→KILL), because `taskkill` cannot terminate `wsl.exe` relay processes — then confirms the worker's exit by identity, not PID liveness.
 
+## Ambient delegation
+
+You don't have to type the commands yourself. Each plugin ships a delegation skill that triggers on task shape, so Claude can reach for Codex or Cursor on its own — a deep second opinion or security pass toward Codex, fast parallel implementation toward Cursor — announcing the handoff in one line, never silently. Jobs run in the background, and `status --wait` issued as a background task closes the loop: Claude picks up the result when the job finishes, without you polling.
+
+```text
+You:    While you refactor the lock, get a second opinion on the cancel path.
+Claude: Delegating a review of the cancel path to Codex in the background.
+        …keeps refactoring; the finished job wakes it up…
+Claude: Codex found two issues in the cancel path. Findings below — nothing
+        has been applied; tell me which ones to fix.
+```
+
+Review findings are never auto-applied, and if a delegated run fails, Claude reports the failure instead of passing off its own output as the delegate's.
+
 ## How it works
 
 Both plugins share a hardened job chassis:
@@ -264,6 +279,7 @@ Both plugins share a hardened job chassis:
 npm ci
 npm test          # node --test tests/*.test.mjs
 npm run build     # regenerates app-server types + tsc checkJs
+npm run verify    # local pre-merge gate: build + native suite + dockerized Linux suite
 ```
 
 - **CI** runs the full suite on `ubuntu-latest` and `windows-latest` for every push and PR (~300 tests). Tests never require a real Codex/Cursor login — fake fixtures on `PATH` stand in for both CLIs.

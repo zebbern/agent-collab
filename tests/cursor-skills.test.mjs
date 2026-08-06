@@ -53,6 +53,35 @@ test("cursor result-handling skill forbids auto-applying review fixes", () => {
   assert.match(handling, /direct the user to `\/cursor:setup`/i);
 });
 
+test("cursor delegation skill drives ambient delegation with disclosure and the wait loop", () => {
+  const delegation = read("skills/cursor-delegation/SKILL.md");
+  assert.match(delegation, /^name: cursor-delegation$/m);
+  // The description must trigger on task shape, not on a command name.
+  assert.match(delegation, /Use when a coding task would benefit from delegating work to Cursor in the background/);
+  assert.match(delegation, /without the user typing \/cursor:\* commands/);
+  assert.match(delegation, /task --background \[--write\] \[--model <model>\] "<prompt>"/);
+  assert.match(delegation, /started in the background as <jobId>/);
+  assert.match(delegation, /status <jobId> --wait --timeout-ms 1800000 --json/);
+  assert.match(delegation, /run_in_background:\s*true/);
+  assert.match(delegation, /If `waitTimedOut` is true and the job is still active, re-issue the same wait/i);
+  assert.match(delegation, /Announce every delegation in one short line/i);
+  assert.match(delegation, /Never silently spawn CLI work/i);
+  assert.match(delegation, /one delegated job of a class at a time/i);
+  assert.match(delegation, /review findings are never auto-applied/i);
+  assert.match(delegation, /Never substitute Claude-authored output as the delegate's/i);
+  // Cursor has no effort tiers — the skill must say so and never offer the flag.
+  assert.match(delegation, /There is no `--effort` flag/);
+  assert.doesNotMatch(delegation, /--effort </);
+  // Reviews have no companion-side enqueue (handleReviewCommand always runs
+  // foreground) — the skill must teach the one-step background Bash flow, not
+  // a jobId wait loop that only task enqueue provides.
+  assert.match(delegation, /loop is for `task` only/);
+  assert.match(delegation, /no companion-side enqueue/);
+  assert.match(delegation, /always runs the review in the foreground/);
+  assert.match(delegation, /the wake IS the collect step/);
+  assert.doesNotMatch(delegation, /review --background/);
+});
+
 test("cursor prompting skill grounds model selection in the live roster", () => {
   const prompting = read("skills/cursor-prompting/SKILL.md");
   assert.match(prompting, /^name: cursor-prompting$/m);
