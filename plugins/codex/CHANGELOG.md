@@ -5,6 +5,24 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## 1.0.6+fork.4
+
+- Added `/codex:doctor`: a read-only health report covering CLI availability and version freshness, auth, registered-broker residue (report-only), and state hygiene (cleanup-pending jobs, likely-dead workers, stale locks, quarantined corrupt state, orphaned job files), each with inline remediation. Warnings never fail the command.
+- Process identity is now locale-stable: `readUnixProcessTable` pins `LC_ALL=C` so the `pid@lstart` identity cannot differ between spawn and cancel under a changed locale, and the Windows identity probe passes `-NonInteractive` so it can never block. `--effort max` is now accepted end to end (codex-cli 0.146.0 supports `model_reasoning_effort=max`).
+- The state directory is now private and validated on every use: created `0o700`, a symlinked or another user's directory is refused, the lock file/cancel flags/job logs are `0o600`, and a corrupt `state.json` is recovered copy-then-replace (no missing-file window) with the rebuilt index persisted durably. Doctor's liveness is tri-state — an unreadable process table reports "unknown", never "healthy".
+- Fixed a broker launch-lock crash: the greeting server handed connections a socket with no error handler, so a probing client's reset became an uncaught exception that could kill the lock holder mid-launch. `npm test` now caps file concurrency at `min(cores, 8)` so the process-spawning e2e tests don't starve their workers on high-core machines.
+- Spawn→ready startup overhead is now recorded durably (an append-only, size-rotated `metrics.jsonl` outside the job-prune window) and summarized per transport by the doctor `startup-overhead` check, to inform the persistent-broker decision.
+- Documentation and review-prompt accuracy: the review prompt gained a `<trust_boundary>` section (repository contents are untrusted data, not instructions) backed by delimiter neutralization so reviewed code cannot forge the section closer; the Node requirement is corrected to `>= 20`.
+- Author-time tooling: `npm run sync-chassis` mechanizes the mirrored-lib copy (refusing the genuinely divergent modules), and `npm run reap-test-residue` reports and (with `--clean`) removes the test suite's temp-directory residue.
+
+## 1.0.6+fork.3
+
+- Codex cancel proves ownership before killing on Windows: a `(pid, CreationDate.ToFileTimeUtc)` identity from a CIM probe, tri-state `ok`/`absent`/`unavailable` results where probe failure is never treated as death, and a fail-closed refusal to kill a bare PID without a proven identity or a live process handle. The same identity discipline is shared with the cursor plugin.
+
+## 1.0.6+fork.2
+
+- Version checkpoint bundling the `fork.1` Windows-hardening and green-suite work; no distinct feature changes were recorded for this bump.
+
 ## 1.0.6+fork.1
 
 - Rewrote the companion CLI usage text so it documents every real subcommand and flag, and added `/codex:help` to print it in-session.
