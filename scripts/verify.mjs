@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // The pre-merge gate, run locally.
 //
-// GitHub Actions is not dispatching CI for this repo at the moment, so this
-// script IS the gate rather than a convenience wrapper. It is deliberately
-// broader than the old CI matrix was: the Linux leg runs in docker where the
-// win32-guarded tests actually execute (the Windows run skips ~40 of them),
-// so the two legs together cover more than either platform alone.
+// GitHub Actions dispatch is intermittent for this repo (a single day has
+// seen it both work and silently fail), so this script is the gate rather
+// than a convenience wrapper — CI availability is not something a merge gate
+// may assume. The Linux leg runs in docker where the win32-guarded tests
+// actually execute (the Windows run skips ~40 of them), so the two legs
+// together cover more than either platform alone.
 //
 //   npm run verify              # build + native suite + Linux suite in docker
 //   npm run verify -- --no-linux  # skip the docker leg deliberately

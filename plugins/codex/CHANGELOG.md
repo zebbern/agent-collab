@@ -7,6 +7,7 @@ Versions up to and including 1.0.6 are upstream releases of
 
 ## Unreleased
 
+- New `codex-delegation` skill makes delegation ambient: Claude can reach for Codex on task shape — firing `task --background` itself, awaiting it with `status <jobId> --wait` as a background Bash task (the harness notification closes the loop), and collecting with `result`; reviews delegate as a single background Bash step (they have no companion-side enqueue). Policy rides in the skill and is pinned by tests: every delegation announced in one line, one job of a class at a time, review findings never auto-applied, failures reported instead of substituted.
 - `/codex:doctor` now audits the installation itself. `plugin-name-collision`: this fork ships a plugin literally named `codex`, so installed alongside the official OpenAI plugin both claim the `/codex:*` commands — the check names every claimant and says to uninstall all but one. `plugin-cache-stale`: cached plugin copies no install records — including residue from uninstalled marketplaces — are surfaced as verify-before-deleting warnings; an unreadable registry or cache reports as unauditable, never as healthy.
 
 ## 1.0.6+fork.4

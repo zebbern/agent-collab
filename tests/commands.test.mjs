@@ -235,6 +235,38 @@ test("internal docs use task terminology for rescue runs", () => {
   assert.match(promptRecipes, /## Narrow Fix/);
 });
 
+test("codex delegation skill drives ambient delegation with disclosure and the wait loop", () => {
+  const delegation = read("skills/codex-delegation/SKILL.md");
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+
+  assert.match(delegation, /^name: codex-delegation$/m);
+  // The description must trigger on task shape, not on a command name.
+  assert.match(delegation, /Use when a coding task would benefit from delegating work to Codex in the background/);
+  assert.match(delegation, /without the user typing \/codex:\* commands/);
+  assert.match(delegation, /task --background \[--write\] \[--effort <tier>\] "<prompt>"/);
+  assert.match(delegation, /started in the background as <jobId>/);
+  assert.match(delegation, /status <jobId> --wait --timeout-ms 1800000 --json/);
+  assert.match(delegation, /run_in_background:\s*true/);
+  assert.match(delegation, /If `waitTimedOut` is true and the job is still active, re-issue the same wait/i);
+  assert.match(delegation, /result <jobId> --json/);
+  assert.match(delegation, /Announce every delegation in one short line/i);
+  assert.match(delegation, /Never silently spawn CLI work/i);
+  assert.match(delegation, /one delegated job of a class at a time/i);
+  assert.match(delegation, /Never delegate when the user explicitly asked Claude to do the work personally/i);
+  assert.match(delegation, /review findings are never auto-applied/i);
+  assert.match(delegation, /Never substitute Claude-authored output as the delegate's/i);
+  // Reviews have no companion-side enqueue (handleReviewCommand always runs
+  // foreground) — the skill must teach the one-step background Bash flow, not
+  // a jobId wait loop that only task enqueue provides.
+  assert.match(delegation, /loop is for `task` only/);
+  assert.match(delegation, /no companion-side enqueue/);
+  assert.match(delegation, /always runs the review in the foreground/);
+  assert.match(delegation, /the wake IS the collect step/);
+  assert.doesNotMatch(delegation, /review --background/);
+  assert.match(readme, /## Ambient delegation/);
+  assert.match(readme, /`status --wait` issued as a background task closes the loop/);
+});
+
 test("hooks keep session-end cleanup and stop gating enabled", () => {
   const source = read("hooks/hooks.json");
   assert.match(source, /SessionStart/);
