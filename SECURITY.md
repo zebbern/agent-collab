@@ -39,6 +39,12 @@ security consequences rather than just functional ones:
   git-visible changes the agent made. It does not cover git-ignored files
   (e.g. `.env`, build output), and it detects rather than prevents. (Codex
   reviews, by contrast, run in the app-server's enforced read-only sandbox.)
+- Review worktree setup (`createReviewWorktree` in `git.mjs`) — reviews run
+  from a disposable worktree so stray *relative* writes land in a throwaway
+  copy. Treat this as blast-radius reduction, **not** a security boundary:
+  the worktree shares the repository's `.git`, and `--trust` leaves absolute
+  paths reachable. Do not build assumptions on top of it that require real
+  isolation.
 - `plugins/*/scripts/lib/state.mjs` — the state directory holds job records
   and logs containing prompts and results.
 
