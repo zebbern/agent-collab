@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The agent prompt travels over stdin, never argv. Review prompts rode `wsl.exe`'s ~32K CreateProcess command line, and a live review over a large diff died with `spawn ENAMETOOLONG` before the agent started. Verified against the real cursor-agent (print mode reads the prompt from stdin when no positional is given); the fake fixture pins the stdin contract with a 64KB regression case.
+- Progress lines now say `[cursor]`, not `[codex]`. The stderr prefix is a plugin-name literal the chassis mirror's swap table missed, so the mirror faithfully copied the codex prefix; the pair is now swapped by `npm run sync-chassis`, pinned by the drift guard, and covered by a behavioral test.
 - `/cursor:doctor` gained the same installation-hygiene checks as the codex doctor: `/cursor:*` command-namespace collision detection across installed marketplaces, and a stale plugin-cache audit that also finds residue from uninstalled marketplaces — with unreadable registry/cache state reported as unauditable, never as healthy.
 
 ## 0.4.0

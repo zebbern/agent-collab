@@ -17,6 +17,7 @@ import { spawn } from "node:child_process";
 import { buildCursorEnv, installFakeCursorAgent } from "./fake-cursor-agent-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { readStartupMetrics, resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
+import { createProgressReporter } from "../plugins/cursor/scripts/lib/tracked-jobs.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs");
@@ -171,8 +172,10 @@ test("task stores the init-resolved session id, model, and native transport", ()
   assert.equal(storedJob.result.durationMs, 42);
   assert.equal(storedJob.result.rawOutput, "Handled the requested task.\nTask prompt accepted.");
 
-  const args = readFakeState(binDir).lastArgs;
-  assert.deepEqual(args.slice(0, 4), ["-p", "check the fake stream", "--output-format", "stream-json"]);
+  const fakeState = readFakeState(binDir);
+  const args = fakeState.lastArgs;
+  assert.deepEqual(args.slice(0, 3), ["-p", "--output-format", "stream-json"]);
+  assert.equal(fakeState.lastPrompt, "check the fake stream");
   assert.equal(args.includes("--force"), false);
   assert.equal(args.includes("--model"), false);
   const workspaceArg = args[args.indexOf("--workspace") + 1];
@@ -197,6 +200,46 @@ test("task --model passes --model through to cursor-agent", () => {
 
   const { storedJob } = readLatestJob(repo);
   assert.equal(storedJob.result.model, "composer-1-test");
+});
+
+test("task prompt travels over stdin, never argv (wsl.exe command-line limit)", () => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  // Far beyond the ~32K chars a Windows command line can carry: if the prompt
+  // ever rides argv again — directly or through the WSL wrapper — a real run
+  // dies with ENAMETOOLONG (observed live, 2026-08-07). The fixture reads the
+  // prompt from stdin only, so an argv regression also fails the content pin.
+  const marker = "ENAMETOOLONG-guard";
+  const prompt = `${marker}-head ${"x".repeat(64 * 1024)} ${marker}-tail`;
+  const promptFile = path.join(makeTempDir(), "prompt.txt");
+  fs.writeFileSync(promptFile, prompt);
+
+  const result = run("node", [SCRIPT, "task", "--prompt-file", promptFile], {
+    cwd: repo,
+    env: buildCursorEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = readFakeState(binDir);
+  assert.equal(fakeState.lastPrompt, prompt);
+  assert.equal(fakeState.lastArgs.some((arg) => arg.includes(marker)), false);
+});
+
+test("cursor progress lines carry the [cursor] prefix, not the codex one", () => {
+  const written = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    createProgressReporter({ stderr: true })("probe line");
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.deepEqual(written, ["[cursor] probe line\n"]);
 });
 
 test("write-mode task passes --force while read mode never does", () => {
@@ -234,11 +277,12 @@ test("task --resume passes --resume and keeps the prior chat id", () => {
   assert.match(result.stdout, /Resumed the prior chat\./);
   assert.match(result.stdout, /Resume in Cursor: cursor-agent --resume sess-prior/);
 
-  const args = readFakeState(binDir).lastArgs;
+  const fakeState = readFakeState(binDir);
+  const args = fakeState.lastArgs;
   const resumeIndex = args.indexOf("--resume");
   assert.notEqual(resumeIndex, -1);
   assert.equal(args[resumeIndex + 1], "sess-prior");
-  assert.match(args[args.indexOf("-p") + 1], /^Continue from the current chat state\./);
+  assert.match(fakeState.lastPrompt, /^Continue from the current chat state\./);
 
   const { storedJob } = readLatestJob(repo);
   assert.equal(storedJob.threadId, "sess-prior");
@@ -374,9 +418,10 @@ test("review runs read-only and renders structured findings", () => {
   assert.match(result.stdout, /\[high\] Missing empty-state guard \(src\/app\.js:4-6\)/);
   assert.match(result.stdout, /Resume in Cursor: cursor-agent --resume sess-fake-1/);
 
-  const args = readFakeState(binDir).lastArgs;
+  const fakeState = readFakeState(binDir);
+  const args = fakeState.lastArgs;
   assert.equal(args.includes("--force"), false);
-  assert.match(args[args.indexOf("-p") + 1], /<output_schema>/);
+  assert.match(fakeState.lastPrompt, /<output_schema>/);
 
   const { job, storedJob } = readLatestJob(repo);
   assert.equal(job.kind, "review");
@@ -459,9 +504,10 @@ test("adversarial review passes focus text into the prompt", () => {
   assert.match(result.stdout, /# Cursor Adversarial Review/);
   assert.match(result.stdout, /Missing empty-state guard/);
 
-  const args = readFakeState(binDir).lastArgs;
+  const fakeState = readFakeState(binDir);
+  const args = fakeState.lastArgs;
   assert.equal(args.includes("--force"), false);
-  assert.match(args[args.indexOf("-p") + 1], /focus on the auth flow/);
+  assert.match(fakeState.lastPrompt, /focus on the auth flow/);
 
   const { job } = readLatestJob(repo);
   assert.equal(job.kind, "adversarial-review");
