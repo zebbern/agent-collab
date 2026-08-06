@@ -208,7 +208,7 @@ export function renderWorkspaceDriftSection(drift) {
     "",
     "## Workspace changes during review",
     "",
-    `The review agent created or modified ${drift.length} file(s) even though reviews run in read mode. Inspect them before staging or committing anything:`,
+    `The review agent created or modified ${drift.length} file(s), which a review should not do. Inspect them before staging or committing anything:`,
     "",
     ...drift.map((file) => `- ${file}`)
   ].join("\n");
@@ -424,6 +424,20 @@ export function collectReviewContext(cwd, target, options = {}) {
     diffBytes,
     inputMode: includeDiff ? "inline-diff" : "self-collect",
     collectionGuidance: buildAdversarialCollectionGuidance({ includeDiff }),
-    ...details
+    ...details,
+    content: neutralizePromptDelimiters(details.content)
   };
+}
+
+// The review prompt wraps this content in a <repository_context> section and
+// tells the model everything inside is untrusted data. Reviewed code could
+// otherwise embed a literal </repository_context> to forge the section closer
+// and appear to escape into trusted-instruction space, so neutralize any
+// repository_context tag in the content by stripping its angle brackets. The
+// text stays readable; it just can no longer close the real section.
+export function neutralizePromptDelimiters(content) {
+  if (typeof content !== "string") {
+    return content;
+  }
+  return content.replace(/<(\/?)repository_context>/gi, "[$1repository_context]");
 }

@@ -59,5 +59,8 @@ test("cursor prompting skill grounds model selection in the live roster", () => 
   assert.match(prompting, /user-invocable: false/);
   assert.match(prompting, /`auto`/);
   assert.match(prompting, /cursor-agent --list-models/);
-  assert.match(prompting, /Reviews run read-only/i);
+  // The skill must not claim reviews are sandboxed — Cursor has no enforced
+  // read-only mode under --trust; pin the honest wording so it cannot rot back.
+  assert.match(prompting, /no enforced read-only sandbox/i);
+  assert.doesNotMatch(prompting, /Reviews run read-only/i);
 });

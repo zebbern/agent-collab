@@ -26,6 +26,6 @@ Model selection (only when the user asks, otherwise leave `auto`):
 - The live roster changes; `cursor-agent --list-models` is the source of truth. Pass names through `--model` unchanged.
 
 Mode notes:
-- Reviews run read-only; never promise edits in a review prompt.
+- Reviews are requested read-only and the plugin reports any git-visible workspace drift afterward, but Cursor has no enforced read-only sandbox — never promise edits in a review prompt, and never rely on a review being unable to write.
 - Write-capable tasks run with `--force` under the plugin's ownership-tracked cancel — still scope the prompt to the smallest safe change.
 - Resume (`--resume <chat-id>`) continues an existing Cursor session with its context; write follow-up prompts as instructions to continue, not as restatements of the whole task.
