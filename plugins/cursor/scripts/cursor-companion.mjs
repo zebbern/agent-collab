@@ -15,14 +15,18 @@ import {
   parseStructuredOutput,
   readOutputSchema,
   reapWslAgent,
-  runCursorTurn
+  runCursorTurn,
+  winPathToWsl
 } from "./lib/cursor.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import {
   captureWorkingTreeFingerprintSafe,
   collectReviewContext,
+  createReviewWorktree,
   detectWorkspaceDrift,
   ensureGitRepository,
+  pruneStaleReviewWorktrees,
+  removeReviewWorktree,
   renderWorkspaceDriftSection,
   resolveReviewTarget
 } from "./lib/git.mjs";
@@ -381,13 +385,41 @@ async function executeReviewRun(request) {
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildReviewPrompt(context, focusText, reviewName);
   const treeBefore = captureWorkingTreeFingerprintSafe(context.repoRoot);
-  const result = await runCursorTurn(context.repoRoot, {
-    prompt,
-    model: request.model,
-    write: false,
-    onProgress: request.onProgress,
-    onWslAgentPid: request.onWslAgentPid
+
+  // Run the agent from a disposable worktree so its default write target is a
+  // throwaway copy. This reduces blast radius (it stops the accidental
+  // scratch-file writes seen live) but is NOT a sandbox: --trust means
+  // absolute paths still reach anywhere, and a worktree shares the user's
+  // .git. Drift detection below remains the real signal. Review CONTENT is
+  // still collected from the real repo above, so what gets reviewed is
+  // unchanged. Sweep worktrees leaked by previously killed runs first.
+  pruneStaleReviewWorktrees(context.repoRoot);
+  const usesWsl = getCursorAvailability(request.cwd).transport === "wsl";
+  const worktree = createReviewWorktree(context.repoRoot, {
+    includeUncommitted: target.mode === "working-tree",
+    translateGitdir: usesWsl ? winPathToWsl : undefined
   });
+  const runRoot = worktree.isolated ? worktree.path : context.repoRoot;
+  request.onProgress?.(
+    worktree.isolated
+      ? "Review running from a disposable worktree (Cursor has no enforced read-only sandbox)."
+      : `Review running in your workspace — disposable worktree unavailable (${worktree.reason}).`
+  );
+
+  let result;
+  try {
+    result = await runCursorTurn(runRoot, {
+      prompt,
+      model: request.model,
+      write: false,
+      onProgress: request.onProgress,
+      onWslAgentPid: request.onWslAgentPid
+    });
+  } finally {
+    removeReviewWorktree(worktree);
+  }
+  // Drift detection stays on the REAL repo as defense in depth: it proves the
+  // isolation held (and still catches writes when isolation was unavailable).
   const workspaceDrift = detectWorkspaceDrift(treeBefore, context.repoRoot);
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
@@ -413,7 +445,11 @@ async function executeReviewRun(request) {
     transport: result.transport ?? null,
     transportReason: result.transportReason ?? null,
     model: result.model ?? null,
-    workspaceDrift
+    workspaceDrift,
+    // Deliberately not called "isolation": a worktree changes the default
+    // write target, it does not create a boundary.
+    reviewWorkspace: worktree.isolated ? "disposable-worktree" : "repository",
+    reviewWorkspaceReason: worktree.isolated ? null : worktree.reason
   };
 
   return {
@@ -426,7 +462,11 @@ async function executeReviewRun(request) {
         reviewLabel: reviewName,
         targetLabel: context.target.label,
         threadId: result.threadId
-      }) + renderWorkspaceDriftSection(workspaceDrift),
+      }) +
+      (worktree.isolated
+        ? "\n\n> Ran from a disposable worktree, so stray writes land there rather than your tree. Cursor has no enforced read-only sandbox, so this reduces blast radius rather than guaranteeing containment — the check below is the actual signal."
+        : `\n\n> Ran directly in your workspace — no disposable worktree (${worktree.reason}). Cursor has no enforced read-only sandbox, so any writes land in your tree.`) +
+      renderWorkspaceDriftSection(workspaceDrift),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Cursor ${reviewName}`,
     jobClass: "review",
