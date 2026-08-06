@@ -269,3 +269,158 @@ export function buildStateHygieneChecks(context) {
     }
   ];
 }
+
+/**
+ * Installation-hygiene checks shared by both plugins. The context carries the
+ * plugin-specific pieces so this module stays provider-free:
+ * { pluginName, pluginsDir } — pluginsDir is <configDir>/plugins, injected so
+ * tests can aim the checks at a fake layout. Layout (verified against the
+ * real installer): installed_plugins.json maps "<name>@<marketplace>" keys to
+ * arrays of install records carrying a version; cached copies live under
+ * cache/<marketplace>/<name>/<version>/.
+ */
+export function buildPluginInstallChecks(context) {
+  const { pluginName, pluginsDir } = context;
+  const registryFile = path.join(pluginsDir, "installed_plugins.json");
+  // Four-state read: "missing" (ENOENT) is healthy — not installed via a
+  // marketplace; "unreadable" (any other I/O failure) and "malformed" are
+  // findings to describe — unknown is not healthy, and doctor must describe a
+  // broken registry, never crash on it or wave it through as absence; "ok"
+  // carries this plugin's entries.
+  const readRegistry = () => {
+    let raw;
+    try {
+      raw = fs.readFileSync(registryFile, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return { state: "missing" };
+      }
+      return { state: "unreadable", detail: error instanceof Error ? error.message : String(error) };
+    }
+    let plugins;
+    try {
+      plugins = JSON.parse(raw)?.plugins;
+    } catch (error) {
+      return { state: "malformed", detail: error instanceof Error ? error.message : String(error) };
+    }
+    if (typeof plugins !== "object" || plugins === null || Array.isArray(plugins)) {
+      return { state: "malformed", detail: 'no "plugins" object' };
+    }
+    const matching = [];
+    for (const [key, records] of Object.entries(plugins)) {
+      const at = key.indexOf("@");
+      if (at <= 0 || key.slice(0, at) !== pluginName) {
+        continue;
+      }
+      const recordList = Array.isArray(records) ? records : [];
+      matching.push({
+        key,
+        marketplace: key.slice(at + 1),
+        recordCount: recordList.length,
+        versions: recordList.map((record) => record?.version).filter((version) => typeof version === "string")
+      });
+    }
+    return { state: "ok", matching };
+  };
+  return [
+    {
+      id: "plugin-name-collision",
+      run: () => {
+        const registry = readRegistry();
+        if (registry.state === "malformed" || registry.state === "unreadable") {
+          return {
+            status: "warning",
+            message: `${registryFile} is not readable as a plugin registry (${registry.detail}); installs cannot be audited.`
+          };
+        }
+        if (registry.state === "missing" || registry.matching.length === 0) {
+          return { status: "ok", message: `${pluginName} is not installed via a marketplace (or no plugin registry).` };
+        }
+        if (registry.matching.length === 1) {
+          return {
+            status: "ok",
+            message: `Exactly one installed plugin (${registry.matching[0].key}) claims the /${pluginName}:* command namespace.`
+          };
+        }
+        return {
+          status: "warning",
+          message: `The /${pluginName}:* command namespace is claimed by ${registry.matching.length} installed plugins — commands may run the copy you did not intend; uninstall all but one.`,
+          details: registry.matching.map((entry) => entry.key)
+        };
+      }
+    },
+    {
+      id: "plugin-cache-stale",
+      run: () => {
+        const registry = readRegistry();
+        if (registry.state === "malformed" || registry.state === "unreadable") {
+          return {
+            status: "warning",
+            message: "The cache cannot be audited against an unreadable plugin registry (see plugin-name-collision)."
+          };
+        }
+        // Scan every marketplace's cache dir for this plugin, not just the
+        // marketplaces the registry still mentions: residue from an
+        // uninstalled marketplace is exactly the leftover this check exists
+        // to find. A missing registry means every cached copy is unrecorded.
+        const matching = registry.state === "ok" ? registry.matching : [];
+        const entriesByMarketplace = new Map(matching.map((entry) => [entry.marketplace, entry]));
+        const cacheRoot = path.join(pluginsDir, "cache");
+        let marketplaceDirs;
+        try {
+          marketplaceDirs = fs.readdirSync(cacheRoot, { withFileTypes: true }).filter((dirent) => dirent.isDirectory());
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            return { status: "ok", message: `No plugin cache directory; nothing cached for ${pluginName}.` };
+          }
+          return {
+            status: "warning",
+            message: `${cacheRoot} is not readable (${error instanceof Error ? error.message : String(error)}); the cache cannot be audited.`
+          };
+        }
+        const stale = [];
+        const unauditable = [];
+        for (const marketplaceDir of marketplaceDirs) {
+          const cacheDir = path.join(cacheRoot, marketplaceDir.name, pluginName);
+          let cached;
+          try {
+            cached = fs.readdirSync(cacheDir, { withFileTypes: true });
+          } catch (error) {
+            if (error?.code !== "ENOENT") {
+              unauditable.push(`${cacheDir} (${error instanceof Error ? error.message : String(error)})`);
+            }
+            continue; // No cached copies of this plugin for this marketplace.
+          }
+          const entry = entriesByMarketplace.get(marketplaceDir.name);
+          if (entry && entry.recordCount > 0 && entry.versions.length === 0) {
+            // The registry claims installs here but records no readable
+            // versions: flagging every cached copy as stale would overclaim.
+            unauditable.push(`${cacheDir} (registry entry ${entry.key} records no readable versions)`);
+            continue;
+          }
+          const recorded = new Set(entry?.versions ?? []);
+          for (const dirent of cached) {
+            if (dirent.isDirectory() && !recorded.has(dirent.name)) {
+              stale.push(path.join(cacheDir, dirent.name));
+            }
+          }
+        }
+        if (stale.length === 0 && unauditable.length === 0) {
+          return { status: "ok", message: `Every cached copy of ${pluginName} matches a registered version.` };
+        }
+        return {
+          status: "warning",
+          message: [
+            stale.length > 0
+              ? `${stale.length} cached cop${stale.length === 1 ? "y" : "ies"} of ${pluginName} not recorded in the plugin registry — residue from an update or uninstall; verify before deleting`
+              : null,
+            unauditable.length > 0 ? `${unauditable.length} cache location(s) could not be audited` : null
+          ]
+            .filter(Boolean)
+            .join("; ") + ".",
+          details: [...stale, ...unauditable.map((entry) => `${entry} — unauditable`)]
+        };
+      }
+    }
+  ];
+}
