@@ -28,7 +28,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/cursor-companion.mjs" task "$ARGUMENTS"
 Operating rules:
 
 - `--background` and `--wait` are execution flags for Claude Code. The companion script accepts `--background` for job bookkeeping, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
-- `--write` lets Cursor modify files; without it the run stays sandboxed and read-only. Only add `--write` when the user clearly asked for changes to be made.
+- `--write` adds `--force` (skips per-command confirmation). Cursor has **no enforced read-only sandbox** under `--trust`, so a task can modify files even without `--write`, and tasks get no workspace-drift check — `--write` only removes the confirmation step. Only add `--write` when the user clearly asked for changes to be made.
 - `--model` is a runtime-selection flag. Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text. Leave the model unset unless the user explicitly asks for one.
 - `--resume <chat-id>` continues an existing Cursor chat. Preserve it verbatim.
 - Return the companion stdout verbatim to the user. Do not paraphrase, summarize, rewrite, or add commentary before or after it.

@@ -773,8 +773,10 @@ export async function runCursorTurn(cwd, options = {}) {
   // (verified against cursor-agent 2026.07.23).
   agentArgs.push("--trust");
   if (options.write) {
-    // Write mode: skip per-command confirmation. Read mode omits --force and
-    // keeps the default sandbox.
+    // Write mode adds --force (skips per-command confirmation). "Read" mode
+    // just omits --force; it is NOT an enforced sandbox — under --trust,
+    // cursor-agent can still write files either way (a live review once did),
+    // which is why reviews carry a post-run workspace-drift check.
     agentArgs.push("--force");
   }
 

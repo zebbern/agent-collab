@@ -33,9 +33,12 @@ security consequences rather than just functional ones:
 - The cancel paths in `plugins/codex/scripts/codex-companion.mjs` and
   `plugins/cursor/scripts/cursor-companion.mjs` — fail-closed cancellation
   gates and the job records they trust.
-- The review workspace-drift check (`git.mjs`) — reviews have no enforced
-  read-only sandbox on the cursor transport, so drift detection is the
-  containment layer for agent writes into the workspace.
+- The review workspace-drift check (`git.mjs`) — Cursor reviews have no
+  enforced read-only sandbox, so this is a **drift-detection** layer, not a
+  containment one: it snapshots the working tree around a review and reports
+  git-visible changes the agent made. It does not cover git-ignored files
+  (e.g. `.env`, build output), and it detects rather than prevents. (Codex
+  reviews, by contrast, run in the app-server's enforced read-only sandbox.)
 - `plugins/*/scripts/lib/state.mjs` — the state directory holds job records
   and logs containing prompts and results.
 
@@ -43,7 +46,8 @@ security consequences rather than just functional ones:
 
 - Fail closed: no kill, cleanup, or cancel completes without proof of
   ownership; unknown state is reported as unknown, never as healthy or clean.
-- Agents are treated as untrusted: their workspace writes are detected and
-  reported, and their output is parsed defensively.
+- Agents are treated as untrusted: their **git-visible** workspace writes are
+  detected and reported (git-ignored paths are out of scope), and their output
+  is parsed defensively.
 - No process-name sweeps: only processes that wrote ownership records are
   ever touched.

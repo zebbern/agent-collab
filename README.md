@@ -79,7 +79,7 @@ A first run that shows the whole loop:
 
 </details>
 
-**Requirements:** [Codex CLI](https://developers.openai.com/codex/cli/) (`npm install -g @openai/codex`) with a ChatGPT subscription or OpenAI API key, Node.js ≥ 18.18.
+**Requirements:** [Codex CLI](https://developers.openai.com/codex/cli/) (`npm install -g @openai/codex`) with a ChatGPT subscription or OpenAI API key, Node.js ≥ 20. (CI covers Linux and Windows; macOS is supported in code but not CI-verified.)
 
 ### Commands
 
@@ -212,7 +212,7 @@ Drives Cursor's headless [`cursor-agent`](https://cursor.com/docs/cli) CLI. Ever
 
 | Command | What it does |
 | --- | --- |
-| `/cursor:review` | Read-only review of your working tree or branch (`--base <ref>`, `--background`) |
+| `/cursor:review` | Review of your working tree or branch (requested read-only — see Safety model) (`--base <ref>`, `--background`) |
 | `/cursor:adversarial-review` | Steerable challenge review with focus text |
 | `/cursor:task` | Delegate a task (`--model`, `--resume <chat-id>`, `--write`, `--background`) |
 | `/cursor:rescue` | Hand a problem to the `cursor:cursor-rescue` subagent — investigate, fix, or continue with `--resume <chat-id>` |
@@ -234,7 +234,12 @@ Cursor defaults to **`auto`** (its server-side router). Pin one per invocation w
 
 ### Safety model
 
-- Reviews run **read-only**; write mode is opt-in per task (`--write`).
+- Reviews are **requested to run read-only**, but Cursor does not provide an
+  enforced read-only sandbox in this mode (it runs with `--trust` and without
+  `--force`). The plugin snapshots the working tree around each review and
+  **detects and reports git-visible changes** the agent made — this is
+  drift detection, not containment, and it does not cover git-ignored files
+  (e.g. `.env`, build output). Write mode is opt-in per task (`--write`).
 - Cancel **proves ownership before killing anything**: workers persist a process identity at start (Unix start-time identity, or `(pid, CreationDate)` on Windows), a stale or reused PID is never killed, and a job with no recorded proof fails closed as `cleanup-pending`.
 - On WSL, cancel reaps the Linux-side agent **inside the distro first** (verifying `/proc` cmdline before signalling, TERM→KILL), because `taskkill` cannot terminate `wsl.exe` relay processes — then confirms the worker's exit by identity, not PID liveness.
 
