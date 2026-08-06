@@ -761,7 +761,12 @@ export async function runCursorTurn(cwd, options = {}) {
   }
 
   const workspacePath = invocation.transport === "wsl" ? winPathToWsl(cwd) : cwd;
-  const agentArgs = ["-p", prompt, "--output-format", "stream-json"];
+  // The prompt travels over stdin, never argv: on Windows the whole argv rides
+  // wsl.exe's CreateProcess command line (~32K chars), and a review prompt over
+  // a large diff blew it with ENAMETOOLONG in a live run. cursor-agent reads
+  // the print-mode prompt from stdin when no positional is given (verified
+  // against the real CLI, 2026-08-07).
+  const agentArgs = ["-p", "--output-format", "stream-json"];
   if (options.model) {
     agentArgs.push("--model", String(options.model));
   }
@@ -870,7 +875,10 @@ export async function runCursorTurn(cwd, options = {}) {
       pollPidFile();
     }
 
-    child.stdin.end();
+    // An agent that dies before draining stdin surfaces through exit/stderr;
+    // the EPIPE from the write must not crash the companion on top of it.
+    child.stdin.on("error", () => {});
+    child.stdin.end(prompt);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
 

@@ -33,7 +33,15 @@ const IDENTICAL_MODULES = ["args.mjs", "prompts.mjs", "workspace.mjs", "process.
 // and the run fails rather than silently under-swapping.
 const LITERAL_SWAP_MODULES = new Map([
   ["state.mjs", [["codex-companion", "cursor-companion"]]],
-  ["tracked-jobs.mjs", [["CODEX_COMPANION_SESSION_ID", "CURSOR_COMPANION_SESSION_ID"]]]
+  [
+    "tracked-jobs.mjs",
+    [
+      ["CODEX_COMPANION_SESSION_ID", "CURSOR_COMPANION_SESSION_ID"],
+      // The stderr progress prefix names the plugin; without this pair the
+      // mirror faithfully copied "[codex]" into cursor (observed live).
+      ["[codex] ", "[cursor] "]
+    ]
+  ]
 ]);
 
 // Genuinely divergent code (provider wording, platform caveats, provider

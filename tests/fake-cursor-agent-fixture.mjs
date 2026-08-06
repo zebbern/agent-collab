@@ -74,12 +74,18 @@ if (promptIndex === -1 || readFlagValue(args, "--output-format") !== "stream-jso
   process.exit(2);
 }
 
-const state = loadState();
-state.runs.push({ args: args, receivedAt: new Date().toISOString() });
-state.lastArgs = args;
-saveState(state);
+// The companion sends the prompt over stdin, never argv (argv rides wsl.exe's
+// ~32K CreateProcess command line on Windows; the real cursor-agent reads the
+// print-mode prompt from stdin when no positional is given — verified live
+// 2026-08-07). Reading stdin here is the contract tripwire: a companion that
+// regresses to an argv prompt leaves this empty and fails the content pins.
+const prompt = fs.readFileSync(0, "utf8");
 
-const prompt = args[promptIndex + 1] || "";
+const state = loadState();
+state.runs.push({ args: args, receivedAt: new Date().toISOString(), promptLength: prompt.length });
+state.lastArgs = args;
+state.lastPrompt = prompt;
+saveState(state);
 const resumeChatId = readFlagValue(args, "--resume");
 const sessionId = resumeChatId || "sess-fake-" + state.runs.length;
 const model = readFlagValue(args, "--model") || "composer-2-fake";
@@ -220,9 +226,9 @@ if (BEHAVIOR === "auth-error") {
   writeExecutable(scriptPath, source);
 
   // Node-script twin of the extensionless CJS fake. CURSOR_COMPANION_TEST_BINARY
-  // can point at it so the adapter uses its argv-only node-script spawn plan,
-  // which keeps multi-line review prompts intact on Windows (the cmd.exe shim
-  // below truncates arguments at the first newline).
+  // can point at it so the adapter uses its node-script spawn plan (prompts
+  // travel over stdin, so argv stays small and newline-free on every plan; the
+  // cmd.exe shim below still truncates any argument at the first newline).
   fs.writeFileSync(
     path.join(binDir, "cursor-agent.mjs"),
     [
