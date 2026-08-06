@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { isProbablyText } from "./fs.mjs";
@@ -212,6 +213,184 @@ export function renderWorkspaceDriftSection(drift) {
     "",
     ...drift.map((file) => `- ${file}`)
   ].join("\n");
+}
+
+const REVIEW_WORKTREE_PREFIX = "agent-collab-review-wt-";
+const STALE_REVIEW_WORKTREE_MS = 6 * 60 * 60 * 1000;
+
+// Reviews run the agent inside a disposable git worktree so an agent that
+// ignores "read-only" physically cannot write into the user's tree. The
+// worktree is checked out at HEAD; for working-tree-scope reviews the
+// uncommitted state (tracked changes as a binary patch, plus untracked
+// files) is materialized into it, or the agent would review the wrong
+// content. Every failure path returns null so the caller can fall back to
+// running in the real repo and SAY SO — a silent fallback would be the
+// "claimed vs wired" trap this repo exists to avoid.
+export function createReviewWorktree(repoRoot, options = {}) {
+  const runGit = options.gitImpl ?? ((args, cwd) => runCommand("git", args, { cwd, shell: false }));
+  const head = runGit(["rev-parse", "HEAD"], repoRoot);
+  if (head.status !== 0) {
+    // No commits yet: nothing to check out.
+    return { path: null, isolated: false, reason: "repository has no commits" };
+  }
+
+  let worktreePath = null;
+  try {
+    worktreePath = fs.mkdtempSync(path.join(options.tmpRoot ?? os.tmpdir(), REVIEW_WORKTREE_PREFIX));
+    // mkdtemp created the directory; git worktree add requires it absent.
+    fs.rmdirSync(worktreePath);
+    const add = runGit(["worktree", "add", "--detach", worktreePath, "HEAD"], repoRoot);
+    if (add.status !== 0) {
+      throw new Error(add.stderr?.trim() || "git worktree add failed");
+    }
+
+    if (options.includeUncommitted) {
+      materializeUncommittedState(repoRoot, worktreePath, runGit);
+    }
+
+    // The worktree's .git is a pointer FILE holding an absolute gitdir path.
+    // When the agent runs inside WSL, a Windows path there resolves to
+    // nothing ("fatal: not a git repository"), so rewrite it to the
+    // translated path — verified working: status/log/diff all succeed.
+    if (typeof options.translateGitdir === "function") {
+      const pointerFile = path.join(worktreePath, ".git");
+      const pointer = fs.readFileSync(pointerFile, "utf8").trim();
+      const gitdir = pointer.replace(/^gitdir:\s*/, "");
+      // Rewrite in place through an r+ handle: git marks this file hidden on
+      // Windows, and writeFileSync's create-always open fails EPERM on a
+      // hidden file.
+      const contents = Buffer.from(`gitdir: ${options.translateGitdir(gitdir)}\n`, "utf8");
+      const handle = fs.openSync(pointerFile, "r+");
+      try {
+        fs.writeSync(handle, contents, 0, contents.length, 0);
+        fs.ftruncateSync(handle, contents.length);
+      } finally {
+        fs.closeSync(handle);
+      }
+    }
+
+    return { path: worktreePath, isolated: true, reason: null, repoRoot };
+  } catch (error) {
+    if (worktreePath) {
+      removeReviewWorktree({ path: worktreePath, repoRoot }, { gitImpl: options.gitImpl });
+    }
+    return {
+      path: null,
+      isolated: false,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+// Config that must be pinned on every plumbing call here. User gitconfig can
+// otherwise make the patch unusable — `diff.noprefix`/`mnemonicPrefix` break
+// `-p1` parsing, `color.ui=always` injects ANSI escapes, a `diff.external`
+// or textconv driver replaces hunks with arbitrary text, and the default
+// `core.quotepath=true` C-quotes non-ASCII paths so untracked files get
+// silently dropped. All verified failure modes, none reproducible on a
+// machine whose gitconfig happens to be tame.
+const PATCH_SAFE_CONFIG = [
+  "-c", "color.ui=false",
+  "-c", "diff.noprefix=false",
+  "-c", "diff.mnemonicPrefix=false",
+  "-c", "diff.external=",
+  "-c", "core.quotepath=false"
+];
+
+function materializeUncommittedState(repoRoot, worktreePath, runGit) {
+  // Tracked changes (staged + unstaged) as one binary-safe patch. NOTE the
+  // deliberate `--submodule=short`: the display diff uses `--submodule=diff`,
+  // whose hunks target paths inside submodules, but `git worktree add` leaves
+  // submodule directories empty, so applying that patch fails outright.
+  const diff = runGit(
+    [...PATCH_SAFE_CONFIG, "diff", "HEAD", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short"],
+    repoRoot
+  );
+  if (diff.status !== 0) {
+    throw new Error(diff.stderr?.trim() || "git diff HEAD failed");
+  }
+  if (diff.stdout.trim()) {
+    const patchFile = path.join(worktreePath, ".agent-collab-review.patch");
+    fs.writeFileSync(patchFile, diff.stdout);
+    // Tolerate CRLF/whitespace differences rather than failing the review.
+    const applied = runGit([...PATCH_SAFE_CONFIG, "apply", "-p1", "--whitespace=nowarn", patchFile], worktreePath);
+    fs.rmSync(patchFile, { force: true });
+    if (applied.status !== 0) {
+      throw new Error(applied.stderr?.trim() || "could not apply uncommitted changes");
+    }
+  }
+
+  // Untracked files are invisible to git diff; copy them in explicitly.
+  const untracked = runGit([...PATCH_SAFE_CONFIG, "ls-files", "--others", "--exclude-standard"], repoRoot);
+  if (untracked.status !== 0) {
+    return;
+  }
+  for (const relative of untracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean)) {
+    const source = path.join(repoRoot, relative);
+    const destination = path.join(worktreePath, relative);
+    try {
+      if (!fs.statSync(source).isFile()) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(source, destination);
+    } catch {
+      // A file that vanished or is unreadable must not sink the review.
+    }
+  }
+}
+
+export function removeReviewWorktree(handle, options = {}) {
+  if (!handle?.path) {
+    return { removed: true };
+  }
+  const runGit = options.gitImpl ?? ((args, cwd) => runCommand("git", args, { cwd, shell: false }));
+  if (handle.repoRoot) {
+    runGit(["worktree", "remove", "--force", handle.path], handle.repoRoot);
+  }
+  try {
+    fs.rmSync(handle.path, { recursive: true, force: true });
+  } catch {
+    // Windows can hold a file open briefly; prune below keeps git consistent
+    // and the stale-sweep reclaims the directory on a later review.
+  }
+  if (handle.repoRoot) {
+    runGit(["worktree", "prune"], handle.repoRoot);
+  }
+  return { removed: !fs.existsSync(handle.path) };
+}
+
+// A killed worker (cancel, SIGKILL) can leave a worktree behind. Each review
+// sweeps old ones first, so residue converges without a cron job — the same
+// self-healing doctrine the broker reaper uses.
+export function pruneStaleReviewWorktrees(repoRoot, options = {}) {
+  const runGit = options.gitImpl ?? ((args, cwd) => runCommand("git", args, { cwd, shell: false }));
+  const tmpRoot = options.tmpRoot ?? os.tmpdir();
+  const maxAgeMs = options.maxAgeMs ?? STALE_REVIEW_WORKTREE_MS;
+  const now = options.now ?? Date.now();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(tmpRoot, { withFileTypes: true });
+  } catch {
+    return { pruned: 0 };
+  }
+  let pruned = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(REVIEW_WORKTREE_PREFIX)) {
+      continue;
+    }
+    const full = path.join(tmpRoot, entry.name);
+    try {
+      if (now - fs.statSync(full).mtimeMs <= maxAgeMs) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    removeReviewWorktree({ path: full, repoRoot }, { gitImpl: options.gitImpl });
+    pruned += 1;
+  }
+  return { pruned };
 }
 
 export function resolveReviewTarget(cwd, options = {}) {

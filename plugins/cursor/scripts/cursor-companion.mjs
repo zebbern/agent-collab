@@ -15,14 +15,18 @@ import {
   parseStructuredOutput,
   readOutputSchema,
   reapWslAgent,
-  runCursorTurn
+  runCursorTurn,
+  winPathToWsl
 } from "./lib/cursor.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import {
   captureWorkingTreeFingerprintSafe,
   collectReviewContext,
+  createReviewWorktree,
   detectWorkspaceDrift,
   ensureGitRepository,
+  pruneStaleReviewWorktrees,
+  removeReviewWorktree,
   renderWorkspaceDriftSection,
   resolveReviewTarget
 } from "./lib/git.mjs";
@@ -381,13 +385,39 @@ async function executeReviewRun(request) {
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildReviewPrompt(context, focusText, reviewName);
   const treeBefore = captureWorkingTreeFingerprintSafe(context.repoRoot);
-  const result = await runCursorTurn(context.repoRoot, {
-    prompt,
-    model: request.model,
-    write: false,
-    onProgress: request.onProgress,
-    onWslAgentPid: request.onWslAgentPid
+
+  // Cursor has no enforced read-only sandbox, so run the agent inside a
+  // disposable worktree: writes land there and are thrown away instead of
+  // reaching the user's tree. Review CONTENT is still collected from the real
+  // repo above, so what gets reviewed is unchanged. Sweep leaked worktrees
+  // from previously killed runs first.
+  pruneStaleReviewWorktrees(context.repoRoot);
+  const usesWsl = getCursorAvailability(request.cwd).transport === "wsl";
+  const worktree = createReviewWorktree(context.repoRoot, {
+    includeUncommitted: target.mode === "working-tree",
+    translateGitdir: usesWsl ? winPathToWsl : undefined
   });
+  const runRoot = worktree.isolated ? worktree.path : context.repoRoot;
+  request.onProgress?.(
+    worktree.isolated
+      ? "Review running in an isolated worktree."
+      : `Review running in the workspace: isolation unavailable (${worktree.reason}).`
+  );
+
+  let result;
+  try {
+    result = await runCursorTurn(runRoot, {
+      prompt,
+      model: request.model,
+      write: false,
+      onProgress: request.onProgress,
+      onWslAgentPid: request.onWslAgentPid
+    });
+  } finally {
+    removeReviewWorktree(worktree);
+  }
+  // Drift detection stays on the REAL repo as defense in depth: it proves the
+  // isolation held (and still catches writes when isolation was unavailable).
   const workspaceDrift = detectWorkspaceDrift(treeBefore, context.repoRoot);
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
@@ -413,7 +443,9 @@ async function executeReviewRun(request) {
     transport: result.transport ?? null,
     transportReason: result.transportReason ?? null,
     model: result.model ?? null,
-    workspaceDrift
+    workspaceDrift,
+    isolation: worktree.isolated ? "worktree" : "none",
+    isolationReason: worktree.isolated ? null : worktree.reason
   };
 
   return {
@@ -426,7 +458,11 @@ async function executeReviewRun(request) {
         reviewLabel: reviewName,
         targetLabel: context.target.label,
         threadId: result.threadId
-      }) + renderWorkspaceDriftSection(workspaceDrift),
+      }) +
+      (worktree.isolated
+        ? ""
+        : `\n\n> Note: this review ran in your workspace, not an isolated worktree (${worktree.reason}). Cursor has no enforced read-only sandbox, so any writes would land in your tree.`) +
+      renderWorkspaceDriftSection(workspaceDrift),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Cursor ${reviewName}`,
     jobClass: "review",
