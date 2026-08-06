@@ -386,11 +386,13 @@ async function executeReviewRun(request) {
   const prompt = buildReviewPrompt(context, focusText, reviewName);
   const treeBefore = captureWorkingTreeFingerprintSafe(context.repoRoot);
 
-  // Cursor has no enforced read-only sandbox, so run the agent inside a
-  // disposable worktree: writes land there and are thrown away instead of
-  // reaching the user's tree. Review CONTENT is still collected from the real
-  // repo above, so what gets reviewed is unchanged. Sweep leaked worktrees
-  // from previously killed runs first.
+  // Run the agent from a disposable worktree so its default write target is a
+  // throwaway copy. This reduces blast radius (it stops the accidental
+  // scratch-file writes seen live) but is NOT a sandbox: --trust means
+  // absolute paths still reach anywhere, and a worktree shares the user's
+  // .git. Drift detection below remains the real signal. Review CONTENT is
+  // still collected from the real repo above, so what gets reviewed is
+  // unchanged. Sweep worktrees leaked by previously killed runs first.
   pruneStaleReviewWorktrees(context.repoRoot);
   const usesWsl = getCursorAvailability(request.cwd).transport === "wsl";
   const worktree = createReviewWorktree(context.repoRoot, {
@@ -400,8 +402,8 @@ async function executeReviewRun(request) {
   const runRoot = worktree.isolated ? worktree.path : context.repoRoot;
   request.onProgress?.(
     worktree.isolated
-      ? "Review running in an isolated worktree."
-      : `Review running in the workspace: isolation unavailable (${worktree.reason}).`
+      ? "Review running from a disposable worktree (Cursor has no enforced read-only sandbox)."
+      : `Review running in your workspace — disposable worktree unavailable (${worktree.reason}).`
   );
 
   let result;
@@ -444,8 +446,10 @@ async function executeReviewRun(request) {
     transportReason: result.transportReason ?? null,
     model: result.model ?? null,
     workspaceDrift,
-    isolation: worktree.isolated ? "worktree" : "none",
-    isolationReason: worktree.isolated ? null : worktree.reason
+    // Deliberately not called "isolation": a worktree changes the default
+    // write target, it does not create a boundary.
+    reviewWorkspace: worktree.isolated ? "disposable-worktree" : "repository",
+    reviewWorkspaceReason: worktree.isolated ? null : worktree.reason
   };
 
   return {
@@ -460,8 +464,8 @@ async function executeReviewRun(request) {
         threadId: result.threadId
       }) +
       (worktree.isolated
-        ? ""
-        : `\n\n> Note: this review ran in your workspace, not an isolated worktree (${worktree.reason}). Cursor has no enforced read-only sandbox, so any writes would land in your tree.`) +
+        ? "\n\n> Ran from a disposable worktree, so stray writes land there rather than your tree. Cursor has no enforced read-only sandbox, so this reduces blast radius rather than guaranteeing containment — the check below is the actual signal."
+        : `\n\n> Ran directly in your workspace — no disposable worktree (${worktree.reason}). Cursor has no enforced read-only sandbox, so any writes land in your tree.`) +
       renderWorkspaceDriftSection(workspaceDrift),
     summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Cursor ${reviewName}`,

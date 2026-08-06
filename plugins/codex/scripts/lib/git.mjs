@@ -218,14 +218,27 @@ export function renderWorkspaceDriftSection(drift) {
 const REVIEW_WORKTREE_PREFIX = "agent-collab-review-wt-";
 const STALE_REVIEW_WORKTREE_MS = 6 * 60 * 60 * 1000;
 
-// Reviews run the agent inside a disposable git worktree so an agent that
-// ignores "read-only" physically cannot write into the user's tree. The
-// worktree is checked out at HEAD; for working-tree-scope reviews the
+// Reviews run the agent from a disposable git worktree so its DEFAULT write
+// target is a throwaway copy instead of the user's tree. This is a blast
+// radius reduction, NOT a sandbox, and the difference matters:
+//
+//   - It does stop the observed failure mode — an agent writing scratch files
+//     at relative paths into its working directory (which happened live).
+//   - It does NOT stop a determined or confused agent. Cursor runs with
+//     --trust and there is no filesystem boundary, so absolute paths still
+//     reach anywhere, and a git worktree deliberately SHARES the user's .git
+//     (the gitdir pointer is what makes git usable in there at all), so refs,
+//     objects, hooks, and config remain reachable.
+//
+// Workspace-drift detection on the real repo stays the actual containment
+// signal. Say all of this plainly rather than implying a boundary that does
+// not exist — overclaiming here is the exact trap this repo keeps correcting.
+//
+// The worktree is checked out at HEAD; for working-tree-scope reviews the
 // uncommitted state (tracked changes as a binary patch, plus untracked
 // files) is materialized into it, or the agent would review the wrong
-// content. Every failure path returns null so the caller can fall back to
-// running in the real repo and SAY SO — a silent fallback would be the
-// "claimed vs wired" trap this repo exists to avoid.
+// content. Every failure path reports the reason so the caller can fall back
+// to the real repo and SAY SO.
 export function createReviewWorktree(repoRoot, options = {}) {
   const runGit = options.gitImpl ?? ((args, cwd) => runCommand("git", args, { cwd, shell: false }));
   const head = runGit(["rev-parse", "HEAD"], repoRoot);
@@ -321,22 +334,30 @@ function materializeUncommittedState(repoRoot, worktreePath, runGit) {
   }
 
   // Untracked files are invisible to git diff; copy them in explicitly.
+  // Failing to enumerate them must fail the whole materialization: reviewing
+  // a tree that is quietly missing the user's new files, while reporting
+  // success, is a silent negative.
   const untracked = runGit([...PATCH_SAFE_CONFIG, "ls-files", "--others", "--exclude-standard"], repoRoot);
   if (untracked.status !== 0) {
-    return;
+    throw new Error(untracked.stderr?.trim() || "could not enumerate untracked files");
   }
   for (const relative of untracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean)) {
     const source = path.join(repoRoot, relative);
     const destination = path.join(worktreePath, relative);
+    let stat;
     try {
-      if (!fs.statSync(source).isFile()) {
-        continue;
-      }
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      fs.copyFileSync(source, destination);
+      stat = fs.lstatSync(source);
     } catch {
-      // A file that vanished or is unreadable must not sink the review.
+      // Raced away between enumeration and copy; nothing to reproduce.
+      continue;
     }
+    if (!stat.isFile()) {
+      // Directories are implied by their files; symlinks are not followed —
+      // copying through one would write outside the disposable tree.
+      continue;
+    }
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
   }
 }
 

@@ -55,12 +55,60 @@ test("a working-tree worktree reproduces uncommitted tracked AND untracked state
   assert.equal(fs.existsSync(path.join(worktree.path, ".agent-collab-review.patch")), false);
 });
 
-test("writes inside the worktree never reach the real repository", (t) => {
+test("incomplete materialization fails closed instead of claiming success", () => {
+  const repo = makeTempDir("wt-review-untracked-fail-");
+  const worktree = createReviewWorktree(repo, {
+    includeUncommitted: true,
+    gitImpl: (args) => {
+      if (args[0] === "rev-parse") {
+        return { status: 0, stdout: "abc123\n", stderr: "", error: null };
+      }
+      if (args.includes("ls-files")) {
+        // Enumerating untracked files fails: reviewing a tree quietly missing
+        // the user's new files while reporting success is a silent negative.
+        return { status: 128, stdout: "", stderr: "fatal: simulated ls-files failure", error: null };
+      }
+      return { status: 0, stdout: "", stderr: "", error: null };
+    }
+  });
+
+  assert.equal(worktree.isolated, false);
+  assert.match(worktree.reason, /simulated ls-files failure/);
+});
+
+test("an untracked symlink is not copied through into the worktree", (t) => {
+  const repo = makeRepo({ dirty: true });
+  const outside = makeTempDir("wt-review-outside-");
+  const secret = path.join(outside, "outside.txt");
+  fs.writeFileSync(secret, "OUTSIDE_CONTENT\n");
+  try {
+    fs.symlinkSync(secret, path.join(repo, "link.txt"));
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip("Symlink creation requires elevated privileges on this platform.");
+      return;
+    }
+    throw error;
+  }
+
+  const worktree = createReviewWorktree(repo, { includeUncommitted: true });
+  t.after(() => removeReviewWorktree(worktree));
+  assert.equal(worktree.isolated, true, worktree.reason ?? "");
+
+  // Copying through the link would write outside the disposable tree.
+  assert.equal(fs.existsSync(path.join(worktree.path, "link.txt")), false);
+});
+
+test("relative agent writes land in the worktree, not the real repository", (t) => {
   const repo = makeRepo({ dirty: true });
   const worktree = createReviewWorktree(repo, { includeUncommitted: true });
   t.after(() => removeReviewWorktree(worktree));
 
-  // Simulate exactly the live incident: an agent writing files mid-review.
+  // This is the blast-radius property the worktree actually provides: an
+  // agent writing at RELATIVE paths (the observed live incident) lands in the
+  // throwaway copy. It is not a sandbox — under --trust an absolute path
+  // still reaches the real tree — which is why drift detection stays the
+  // containment signal and the docs say so.
   fs.writeFileSync(path.join(worktree.path, "agent-scratch.sh"), "#!/bin/sh\n");
   fs.writeFileSync(path.join(worktree.path, "app.js"), "export const value = 999; // AGENT EDIT\n");
 
