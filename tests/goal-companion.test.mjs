@@ -152,7 +152,7 @@ function writeGoalFixture(project, overrides = {}) {
 }
 
 function companion(args, project) {
-  return run("node", [SCRIPT, ...args, "--cwd", project], { env: { ...process.env } });
+  return run(process.execPath, [SCRIPT, ...args, "--cwd", project], { env: { ...process.env } });
 }
 
 test("set validates and writes; status reports counts and ledger health", () => {
@@ -279,6 +279,24 @@ test("record merged stores the disposition with pr and delegate", () => {
   assert.equal(last.event, "disposition");
   assert.equal(last.disposition, "merged");
   assert.equal(last.pr, 12);
+});
+
+test("multi-word option values survive the spawn boundary verbatim", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  companion(["start", "test-goal", "first-item"], project);
+  const record = companion(
+    ["record", "test-goal", "first-item", "--disposition", "discarded", "--notes", "needs credentials and a second pass"],
+    project
+  );
+  assert.equal(record.status, 0, record.stderr);
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(project, ".claude", "goals", "test-goal.json"), "utf8")
+  );
+  assert.equal(
+    stored.backlog.find((item) => item.id === "first-item").disposition.notes,
+    "needs credentials and a second pass"
+  );
 });
 
 test("check judges command criteria by exit code and lists manual ones", () => {

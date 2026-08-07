@@ -179,13 +179,9 @@ async function handleRecord(argv) {
     booleanOptions: ["json"]
   });
   const cwd = resolveCommandCwd(options);
-  const [slugArg, itemId, ...extra] = positionals;
+  const [slugArg, itemId] = positionals;
   if (!slugArg || !itemId) {
     throw new Error("record requires <slug> <itemId>");
-  }
-  // Handle shell splitting of multi-word option values on Windows
-  if (extra.length > 0 && options.notes) {
-    options.notes = [options.notes, ...extra].join(" ");
   }
   const disposition = options.disposition;
   if (!DISPOSITIONS.includes(disposition)) {
