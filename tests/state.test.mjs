@@ -547,3 +547,122 @@ test("concurrent state updates are serialized by the state lock", async () => {
   }
   assert.equal(counter, workers * incrementsPerWorker);
 });
+
+test("the warned unlocked path survives rename contention instead of crashing", async () => {
+  // Regression for a live 2026-08-07 failure: two workers timed out on the
+  // lock, both proceeded unlocked, and their concurrent state.json renames
+  // collided — EPERM from renameSync crashed a worker. Hold the lock with a
+  // fresh mtime (well under STATE_LOCK_STALE_MS, so nobody steals it) and
+  // every worker times out into the warned unlocked path on the SAME 5s
+  // deadline — synchronized renames, the exact collision shape observed.
+  // A collision on any given run is probabilistic, so this is a tripwire,
+  // not a proof: it can never false-fail, because unlocked lost updates are
+  // designed behavior and asserted only as bounds.
+  const workspace = makeTempDir();
+  updateState(workspace, (state) => {
+    state.config.counter = 0;
+  });
+  const lockFile = path.join(resolveStateDir(workspace), "state.lock");
+  fs.writeFileSync(lockFile, "held-by-test", { mode: 0o600 });
+  // A FUTURE mtime makes the stale check (now - mtime > STATE_LOCK_STALE_MS)
+  // unsatisfiable for the whole test, so no worker can steal the lock even
+  // under heavy process-start skew — every worker must take the warned
+  // unlocked path deterministically.
+  const future = new Date(Date.now() + 60_000);
+  fs.utimesSync(lockFile, future, future);
+  try {
+    const workers = 4;
+    const script = `
+      import { updateState } from ${JSON.stringify(new URL("../plugins/codex/scripts/lib/state.mjs", import.meta.url).href)};
+      updateState(${JSON.stringify(workspace)}, (state) => {
+        state.config.counter = (state.config.counter ?? 0) + 1;
+      });
+    `;
+    const results = await Promise.all(
+      Array.from({ length: workers }, () =>
+        new Promise((resolve) => {
+          const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+            env: process.env,
+            stdio: ["ignore", "ignore", "pipe"]
+          });
+          let stderr = "";
+          child.stderr.setEncoding("utf8");
+          child.stderr.on("data", (chunk) => {
+            stderr += chunk;
+          });
+          child.on("close", (status) => resolve({ status, stderr }));
+          child.on("error", (error) => resolve({ status: -1, stderr: String(error) }));
+        })
+      )
+    );
+    for (const result of results) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /proceeding without it/);
+    }
+    const counter = loadState(workspace).config.counter;
+    assert.ok(counter > 0 && counter <= workers, `unexpected counter ${counter}`);
+  } finally {
+    fs.unlinkSync(lockFile);
+  }
+});
+
+test("a transient rename failure is retried once and the write lands", (t) => {
+  const workspace = makeTempDir();
+  updateState(workspace, (state) => {
+    state.config.counter = 1;
+  });
+
+  const realRenameSync = fs.renameSync;
+  let calls = 0;
+  fs.renameSync = (from, to) => {
+    calls += 1;
+    if (calls === 1) {
+      const error = /** @type {NodeJS.ErrnoException} */ (new Error("EPERM: operation not permitted"));
+      error.code = "EPERM";
+      throw error;
+    }
+    return realRenameSync(from, to);
+  };
+  t.after(() => {
+    fs.renameSync = realRenameSync;
+  });
+
+  updateState(workspace, (state) => {
+    state.config.counter = 2;
+  });
+  assert.equal(calls, 2);
+  assert.equal(loadState(workspace).config.counter, 2);
+});
+
+test("persistent rename failure exhausts the bounded retry loudly, leaving no residue", (t) => {
+  const workspace = makeTempDir();
+  updateState(workspace, (state) => {
+    state.config.counter = 7;
+  });
+
+  const realRenameSync = fs.renameSync;
+  let calls = 0;
+  fs.renameSync = () => {
+    calls += 1;
+    const error = /** @type {NodeJS.ErrnoException} */ (new Error("EACCES: permission denied"));
+    error.code = "EACCES";
+    throw error;
+  };
+  t.after(() => {
+    fs.renameSync = realRenameSync;
+  });
+
+  assert.throws(
+    () =>
+      updateState(workspace, (state) => {
+        state.config.counter = 8;
+      }),
+    /EACCES/
+  );
+  // 1 initial attempt + 10 retries = 11 calls, then the loud failure.
+  assert.equal(calls, 11);
+  fs.renameSync = realRenameSync;
+  assert.equal(loadState(workspace).config.counter, 7);
+  const residue = fs.readdirSync(resolveStateDir(workspace)).filter((entry) => entry.endsWith(".tmp"));
+  assert.deepEqual(residue, []);
+});
