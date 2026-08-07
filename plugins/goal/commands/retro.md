@@ -8,8 +8,10 @@ allowed-tools: Bash(node:*)
 Analyze the goal ledger's history and propose policy improvements — never
 code changes, and never auto-applied.
 
-The ledger speaks four events: `step-started`, `disposition`, `closed`, and
-`correction`. `step-started` and `disposition` track one backlog item's
+The ledger speaks five events: `step-started`, `disposition`, `closed`,
+`correction`, and `retro`. `retro` is a retrospective's own trace: scope,
+disposition count, floor verdict, proposal PR. `step-started` and
+`disposition` track one backlog item's
 work; `closed` records a goal-level outcome (`done` or `abandoned`) and its
 timing; `correction` is an accounting-style reversal appended after an
 earlier `disposition` (or `closed`) line when the goal file was hand-edited
@@ -75,8 +77,21 @@ change on global evidence.
      — brief shapes that hung versus succeeded, delegation patterns, retry
      narrowings. A method observation cited from notes or a PR body is
      evidence; a method opinion without a citation is not.
-6. Write the proposal, citing the specific ledger entries (and PR bodies)
+6. **Evaluate prior adoptions first.** Read prior `retro` events; for each
+   with a proposal PR, find that PR's `mergedAt` via `gh`, and compare
+   outcomes before vs after it (merge rate, blocked rate, step durations,
+   refine-once frequency, delegate mix). Its own honesty floor: fewer than
+   3 dispositions on either side of an adoption point means say 'too thin
+   to judge this adoption yet' and move on — no verdict. A prior proposal
+   showing no improvement, or regression, makes proposing its REVERSAL a
+   legitimate finding. A retro must not propose new method changes while
+   ignoring the results of old ones.
+7. Write the proposal, citing the specific ledger entries (and PR bodies)
    behind each claim.
+8. Record the run via
+   `node "${CLAUDE_PLUGIN_ROOT}/scripts/goal-companion.mjs" retro-record [slug|--all] --pr <n> --findings <n>`
+   — a retro that leaves no trace cannot be evaluated by its successor;
+   record floor-refused runs too.
 
 ## Hard rules
 

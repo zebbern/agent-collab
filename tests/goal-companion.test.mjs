@@ -741,3 +741,133 @@ test("set truncates long notes in a correction line to ~120 chars", () => {
   assert.ok(notesCorrection.from.endsWith("…"), notesCorrection.from);
   assert.ok(notesCorrection.to.endsWith("…"), notesCorrection.to);
 });
+
+test("retro-record --all counts dispositions across goals and writes floorMet false at low counts", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, { slug: "goal-a" });
+  writeGoalFixture(project, { slug: "goal-b" });
+  appendLedger(project, { slug: "goal-a", itemId: "i1", event: "disposition", disposition: "merged" });
+  appendLedger(project, { slug: "goal-b", itemId: "i2", event: "disposition", disposition: "dropped" });
+  appendLedger(project, { slug: "goal-a", itemId: "i3", event: "step-started" });
+
+  const recorded = companion(["retro-record", "--all", "--json"], project);
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const payload = JSON.parse(recorded.stdout);
+  assert.equal(payload.scope, "portfolio");
+  assert.equal(payload.slug, undefined);
+  assert.equal(payload.dispositions, 2);
+  assert.equal(payload.floorMet, false);
+
+  const { entries } = readLedger(project);
+  const retro = entries.at(-1);
+  assert.equal(retro.event, "retro");
+  assert.equal(retro.slug, "(portfolio)");
+  assert.equal(retro.scope, "portfolio");
+  assert.equal(retro.dispositions, 2);
+  assert.equal(retro.floorMet, false);
+  assert.equal(retro.itemId, undefined);
+});
+
+test("retro-record per-goal carries scope per-goal and the goal's slug", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, { slug: "goal-a" });
+  writeGoalFixture(project, { slug: "goal-b" });
+  appendLedger(project, { slug: "goal-a", itemId: "i1", event: "disposition", disposition: "merged" });
+  appendLedger(project, { slug: "goal-b", itemId: "i2", event: "disposition", disposition: "dropped" });
+
+  const recorded = companion(["retro-record", "goal-a", "--json"], project);
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const payload = JSON.parse(recorded.stdout);
+  assert.equal(payload.scope, "per-goal");
+  assert.equal(payload.slug, "goal-a");
+  assert.equal(payload.dispositions, 1);
+  assert.equal(payload.floorMet, false);
+
+  const { entries } = readLedger(project);
+  const retro = entries.at(-1);
+  assert.equal(retro.event, "retro");
+  assert.equal(retro.slug, "goal-a");
+  assert.equal(retro.scope, "per-goal");
+  assert.equal(retro.dispositions, 1);
+});
+
+test("retro-record sets floorMet true when the scope has 5+ dispositions", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  for (let index = 0; index < 5; index += 1) {
+    appendLedger(project, {
+      slug: "test-goal",
+      itemId: `item-${index}`,
+      event: "disposition",
+      disposition: "merged"
+    });
+  }
+
+  const recorded = companion(
+    ["retro-record", "test-goal", "--pr", "37", "--findings", "2", "--json"],
+    project
+  );
+  assert.equal(recorded.status, 0, recorded.stderr);
+  const payload = JSON.parse(recorded.stdout);
+  assert.equal(payload.dispositions, 5);
+  assert.equal(payload.floorMet, true);
+  assert.equal(payload.pr, 37);
+  assert.equal(payload.findings, 2);
+
+  const { entries } = readLedger(project);
+  const retro = entries.at(-1);
+  assert.equal(retro.floorMet, true);
+  assert.equal(retro.pr, 37);
+  assert.equal(retro.findings, 2);
+});
+
+test("retro-record --all refuses a slug and refuses an empty project", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  const both = companion(["retro-record", "test-goal", "--all"], project);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /--all takes no slug/);
+
+  const empty = makeTempDir("goal-plugin-test-proj-");
+  const none = companion(["retro-record", "--all"], empty);
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /No goal files found/);
+});
+
+test("retro-record refuses invalid --pr and --findings, naming the flag", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+
+  const badPr = companion(["retro-record", "test-goal", "--pr", "0"], project);
+  assert.equal(badPr.status, 1);
+  assert.match(badPr.stderr, /--pr/);
+
+  const badFindings = companion(["retro-record", "test-goal", "--findings", "-1"], project);
+  assert.equal(badFindings.status, 1);
+  assert.match(badFindings.stderr, /--findings/);
+});
+
+test("ledger text render for a retro event contains retro and no undefined", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  appendLedger(project, {
+    slug: "test-goal",
+    itemId: "i1",
+    event: "disposition",
+    disposition: "merged"
+  });
+  const recorded = companion(
+    ["retro-record", "test-goal", "--pr", "37", "--findings", "0"],
+    project
+  );
+  assert.equal(recorded.status, 0, recorded.stderr);
+
+  const ledger = companion(["ledger", "test-goal"], project);
+  assert.equal(ledger.status, 0, ledger.stderr);
+  assert.match(ledger.stdout, /retro/);
+  assert.match(ledger.stdout, /dispositions=1/);
+  assert.match(ledger.stdout, /floor-refused/);
+  assert.match(ledger.stdout, /PR#37/);
+  assert.match(ledger.stdout, /findings=0/);
+  assert.doesNotMatch(ledger.stdout, /undefined/);
+});
