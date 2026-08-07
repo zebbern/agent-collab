@@ -12,3 +12,4 @@ consequences we accept. Records are append-only history: supersede, don't edit.
 | [0004](0004-no-windows-broker.md) | No Windows broker (for now) | Accepted | 2026-08-07 |
 | [0005](0005-local-verify-gate.md) | Local verify gate | Accepted | 2026-08-07 |
 | [0006](0006-ambient-delegation-via-skills.md) | Ambient delegation via skills, not an MCP server | Accepted | 2026-08-07 |
+| [0007](0007-goal-plugin-standalone.md) | Goal plugin opts out of the mirrored chassis | Accepted | 2026-08-07 |

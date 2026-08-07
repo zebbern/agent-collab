@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PLUGINS = ["codex", "cursor"];
+const PLUGINS = ["codex", "cursor", "goal"];
 
 // Extract import specifiers from ESM source without executing it. Comments
 // are dropped line by line first: JSDoc type references like

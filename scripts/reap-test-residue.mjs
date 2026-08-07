@@ -33,7 +33,8 @@ export const TEST_DIR_PREFIXES = [
   "codex-plugin-runtime-state-",
   "cursor-plugin-runtime-state-",
   "sync-chassis-test-",
-  "cxc-launcher-exit-"
+  "cxc-launcher-exit-",
+  "goal-plugin-test-"
 ];
 
 function isTestResidue(name) {
@@ -87,7 +88,7 @@ function collectResidue(root) {
 export function findTestResidue(root) {
   // The two places residue lands: makeTempDir workspaces/plugin-data dirs sit
   // directly under temp; fallback state dirs sit under the companion roots.
-  const roots = [root, path.join(root, "codex-companion"), path.join(root, "cursor-companion")];
+  const roots = [root, path.join(root, "codex-companion"), path.join(root, "cursor-companion"), path.join(root, "goal-companion")];
   return roots.flatMap((dir) => collectResidue(dir));
 }
 

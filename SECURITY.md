@@ -8,8 +8,8 @@ Please report vulnerabilities privately via GitHub:
 security problems.
 
 You should get a first response within a week. Please include the OS
-(Windows/WSL details matter here), the plugin (`codex` or `cursor`), and the
-codex / cursor-agent CLI versions involved.
+(Windows/WSL details matter here), the plugin (`codex`, `cursor`, or `goal`),
+and the codex / cursor-agent CLI versions involved.
 
 ## Supported versions
 
@@ -47,6 +47,7 @@ security consequences rather than just functional ones:
   isolation.
 - `plugins/*/scripts/lib/state.mjs` — the state directory holds job records
   and logs containing prompts and results.
+- `goal` `check` executes command acceptance criteria from `.claude/goals/*.json` via the shell — goal files are project content with the same trust level as npm scripts; review them in untrusted repos.
 
 ## Design principles
 

@@ -1,0 +1,71 @@
+// Doc and manifest pins for the goal plugin, mirroring the discipline of
+// tests/cursor-skills.test.mjs: the manifests, commands, and skill carry
+// contracts that must not drift silently.
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PLUGIN = path.join(ROOT, "plugins", "goal");
+
+function read(relative) {
+  return fs.readFileSync(path.join(PLUGIN, relative), "utf8");
+}
+
+test("goal plugin manifest and marketplace entry agree", () => {
+  const plugin = JSON.parse(read(path.join(".claude-plugin", "plugin.json")));
+  assert.equal(plugin.name, "goal");
+  assert.equal(plugin.version, "0.1.0");
+  assert.match(plugin.description, /long-horizon/i);
+
+  const marketplace = JSON.parse(
+    fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8")
+  );
+  const entry = marketplace.plugins.find((candidate) => candidate.name === "goal");
+  assert.ok(entry, "marketplace.json has no goal entry");
+  assert.equal(entry.version, "0.1.0");
+  assert.equal(entry.source, "./plugins/goal");
+});
+
+test("goal plugin ships license and changelog", () => {
+  assert.match(read("LICENSE"), /Apache License/);
+  assert.match(read("CHANGELOG.md"), /## 0\.1\.0/);
+});
+
+test("goal step command pins the one-increment choreography", () => {
+  const step = read(path.join("commands", "step.md"));
+  assert.match(step, /One increment per invocation/);
+  assert.match(step, /Announce the increment in one line/);
+  assert.match(step, /goal-companion\.mjs" next/);
+  assert.match(step, /goal-companion\.mjs" start/);
+  assert.match(step, /Analysis and implementation are separate delegations/);
+  assert.match(step, /refine the brief with the failure evidence and re-delegate once/);
+  assert.match(step, /--disposition blocked/);
+  assert.match(step, /Do not start another increment/);
+});
+
+test("goal commands pin their frontmatter: user-surface only, node-only bash", () => {
+  for (const command of ["set", "step", "status", "help"]) {
+    const source = read(path.join("commands", `${command}.md`));
+    assert.match(source, /^disable-model-invocation: true$/m, `${command}.md`);
+    assert.match(source, /^allowed-tools: Bash\(node:\*\)$/m, `${command}.md`);
+  }
+});
+
+test("goal-runner skill pins the policy", () => {
+  const skill = read(path.join("skills", "goal-runner", "SKILL.md"));
+  assert.match(skill, /^name: goal-runner$/m);
+  assert.match(skill, /one increment at a time/i);
+  assert.match(skill, /codex-delegation|cursor-delegation/);
+  assert.match(skill, /blocked is a full stop/i);
+  assert.match(skill, /Never invent progress/);
+});
+
+test("README documents the goal plugin", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  assert.match(readme, /## Goal plugin/);
+  assert.match(readme, /\[Goal plugin\]\(#goal-plugin\)/);
+  assert.match(readme, /one increment at a time/);
+});

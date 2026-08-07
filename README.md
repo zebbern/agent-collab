@@ -15,6 +15,7 @@ Run Codex and Cursor as background workers inside Claude Code — reviews, tasks
 [Codex plugin](#codex-plugin) •
 [Cursor plugin](#cursor-plugin) •
 [Ambient delegation](#ambient-delegation) •
+[Goal plugin](#goal-plugin) •
 [How it works](#how-it-works) •
 [Development](#development) •
 [License](#license--attribution)
@@ -23,14 +24,15 @@ Run Codex and Cursor as background workers inside Claude Code — reviews, tasks
 
 ---
 
-One marketplace, two plugins:
+One marketplace, three plugins:
 
 | Plugin | Delegates to | Highlights |
 | --- | --- | --- |
 | **`codex`** | [OpenAI Codex](https://developers.openai.com/codex/) (`codex` CLI) | `/codex:review`, `/codex:adversarial-review`, `/codex:rescue`, session transfer, optional stop-review gate. Community fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) with Windows fixes. |
 | **`cursor`** | [Cursor](https://cursor.com) (`cursor-agent` CLI) | `/cursor:review`, `/cursor:task`, ownership-verified cancel, WSL support on Windows, resolved-model + token-usage recording. |
+| **`goal`** | Long-horizon goals | `/goal:set`, `/goal:step` — one increment per invocation, delegating through the other two plugins, with mechanical state and dispositions. |
 
-Both share the same job chassis: background jobs with progress-aware `status`, stored `result` output, model recording, `resume` handoffs into the native tool, and cancel that never kills a process it can't prove it owns.
+The codex and cursor plugins share the same job chassis: background jobs with progress-aware `status`, stored `result` output, model recording, `resume` handoffs into the native tool, and cancel that never kills a process it can't prove it owns.
 
 ## Quick start
 
@@ -40,11 +42,12 @@ Add the marketplace in Claude Code:
 /plugin marketplace add zebbern/agent-collab
 ```
 
-Install one or both plugins:
+Install any of the plugins:
 
 ```bash
 /plugin install codex@agent-collab
 /plugin install cursor@agent-collab
+/plugin install goal@agent-collab
 ```
 
 Reload, then check readiness:
@@ -264,9 +267,29 @@ Claude: Codex found two issues in the cancel path. Findings below — nothing
 
 Review findings are never auto-applied, and if a delegated run fails, Claude reports the failure instead of passing off its own output as the delegate's.
 
+## Goal plugin
+
+Set a long-horizon goal once, then advance it one increment at a time — in
+session, with you watching. `/goal:set` writes a schema-validated, git-tracked
+goal file (`.claude/goals/<slug>.json`) with a ranked backlog and acceptance
+criteria; `/goal:step` picks the next increment deterministically, executes it
+(delegating to Codex or Cursor through the same skills as above), lands the
+change as a PR through your normal gates, and records what actually happened
+— merged, discarded, or blocked — in the goal file and an append-only ledger.
+The companion enforces the honest parts mechanically: one in-progress item at
+a time, refusals with specifics instead of silent repair, and a blocked goal
+is a full stop until a human resolves it.
+
+```bash
+/plugin install goal@agent-collab
+/goal:set    # interview → validated goal file
+/goal:step   # advance exactly one increment
+/goal:status
+```
+
 ## How it works
 
-Both plugins share a hardened job chassis:
+Both delegation plugins share a hardened job chassis:
 
 - **Background jobs** — spawn, track, and detach; jobs survive the Claude session that started them.
 - **Progress-aware status** — live phase, file-change/command/token telemetry, last-activity signals, and `likely dead` detection for stalled jobs.
