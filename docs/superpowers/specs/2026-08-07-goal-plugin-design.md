@@ -142,9 +142,9 @@ Conventions shared with the siblings: every subcommand accepts `--cwd`
 | `status [<slug>]` | Goal, progress counts, in-progress item, ledger tail + corrupt-line count. Slug optional when exactly one goal exists. |
 | `next [<slug>]` | Read-only. First `todo` item. Non-zero exit with the reason if the goal is not `active` or an item is already `in-progress`. |
 | `start <slug> <itemId>` | Marks `in-progress`; refuses if any other item is `in-progress` (mechanical one-increment-at-a-time). Appends `step-started`. |
-| `record <slug> <itemId> --disposition merged\|discarded\|dropped\|blocked [--pr N] [--delegate codex\|cursor\|none] [--notes …]` | Enforces the state machine: `todo → in-progress → terminal`; `dropped` additionally allowed from `todo` (grooming). Appends the disposition ledger line. `blocked` also sets the goal `blocked` with the reason. |
+| `record <slug> <itemId> --disposition merged\|discarded\|dropped\|blocked [--pr N] [--delegate codex\|cursor\|none] [--notes …]` | Enforces the state machine: `todo → in-progress → terminal`; `dropped` additionally allowed from `todo` (grooming). Appends the disposition ledger line. `blocked` also sets the goal `blocked` with the reason. Refuses once the goal has left `active` — blocked/done/abandoned goals are frozen; a blocked goal resolves by editing the file and re-running `set`. |
 | `check [<slug>]` | Runs each `command` criterion (via shell — see trust boundary), reports per-criterion pass/fail, lists `manual` criteria. Exit 0 only if all command criteria pass. |
-| `close <slug> --done\|--abandoned` | `--done` refuses unless no `todo`/`in-progress` items remain AND `check` passes. |
+| `close <slug> --done\|--abandoned` | `--done` refuses unless the goal is `active`, no `todo`/`in-progress`/`blocked` items remain, AND `check` passes. |
 | `help` | Usage. |
 
 Slug resolution: where `<slug>` is optional, it may be omitted only when

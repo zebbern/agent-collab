@@ -198,6 +198,11 @@ async function handleRecord(argv) {
     }
   }
   const { slug, goal } = resolveGoal(cwd, slugArg);
+  if (goal.status !== "active") {
+    throw new Error(
+      `Goal "${slug}" is ${goal.status}; dispositions are frozen once a goal leaves active. Edit the goal file and re-run set if this is intentional.`
+    );
+  }
   const item = requireItem(goal, itemId);
   if (disposition === "dropped") {
     if (item.status !== "todo" && item.status !== "in-progress") {
@@ -296,6 +301,17 @@ async function handleClose(argv) {
   }
   const { slug, goal } = resolveGoal(cwd, slugArg);
   if (options.done) {
+    if (goal.status !== "active") {
+      throw new Error(
+        `Cannot close as done: goal "${slug}" is ${goal.status}${goal.status === "blocked" ? ` (${goal.blockedReason})` : ""}. Resolve that first.`
+      );
+    }
+    const blockedItems = goal.backlog.filter((item) => item.status === "blocked");
+    if (blockedItems.length > 0) {
+      throw new Error(
+        `Cannot close as done: ${blockedItems.length} item(s) are blocked (${blockedItems.map((item) => item.id).join(", ")}) — resolve them (back to todo, or dropped) by editing the goal file and re-running set.`
+      );
+    }
     const open = goal.backlog.filter(
       (item) => item.status === "todo" || item.status === "in-progress"
     );

@@ -330,3 +330,41 @@ test("close --done refuses while work remains, succeeds when the backlog is sett
   assert.equal(done.status, 0, done.stderr);
   assert.equal(JSON.parse(done.stdout).status, "done");
 });
+
+test("blocked is a full stop: record freezes and close --done refuses", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  companion(["start", "test-goal", "first-item"], project);
+  companion(["record", "test-goal", "first-item", "--disposition", "blocked", "--notes", "stuck"], project);
+
+  const dropOnBlocked = companion(["record", "test-goal", "second-item", "--disposition", "dropped"], project);
+  assert.equal(dropOnBlocked.status, 1);
+  assert.match(dropOnBlocked.stderr, /blocked/);
+
+  const done = companion(["close", "test-goal", "--done"], project);
+  assert.equal(done.status, 1);
+  assert.match(done.stderr, /blocked/);
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(project, ".claude", "goals", "test-goal.json"), "utf8")
+  );
+  assert.equal(stored.status, "blocked");
+
+  const abandoned = companion(["close", "test-goal", "--abandoned", "--json"], project);
+  assert.equal(abandoned.status, 0, abandoned.stderr);
+  const late = companion(["record", "test-goal", "second-item", "--disposition", "dropped"], project);
+  assert.equal(late.status, 1);
+  assert.match(late.stderr, /abandoned/);
+});
+
+test("close --done refuses a hand-edited active goal that still carries a blocked item", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project, {
+    backlog: [
+      { id: "stuck-item", title: "stuck", status: "blocked", disposition: { recordedAt: "2026-08-07T00:00:00.000Z", notes: "stuck" } },
+      { id: "ok-item", title: "ok", status: "dropped", disposition: { recordedAt: "2026-08-07T00:00:00.000Z" } }
+    ]
+  });
+  const done = companion(["close", "test-goal", "--done"], project);
+  assert.equal(done.status, 1);
+  assert.match(done.stderr, /stuck-item/);
+});
