@@ -27,6 +27,12 @@ import {
 } from "../plugins/codex/scripts/lib/state.mjs";
 import { createJobLogFile } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
+// Single-file runs (node --test tests/<f>) bypass scripts/run-tests.mjs's
+// env scrub, so shed any ambient installed-plugin data dir here too: these
+// tests assert the tmpdir fallback and per-workspace isolation, which a
+// harness-provided CLAUDE_PLUGIN_DATA (both plugins share the var) breaks.
+delete process.env.CLAUDE_PLUGIN_DATA;
+
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);

@@ -39,10 +39,32 @@ export function writeExecutable(filePath, source) {
   fs.writeFileSync(filePath, source, { encoding: "utf8", mode: 0o755 });
 }
 
+// Session vars the INSTALLED plugins' SessionStart hooks export into every
+// Bash environment of a live Claude session. A suite run from such a session
+// leaks them into test-spawned companions, which then session-filter the
+// synthetic jobs away (observed 2026-08-07, the day the plugins were first
+// really installed: two status tests went red on the native leg while the
+// docker leg's clean env stayed green). Scrub a var only when its value is
+// identical to the ambient one — i.e. it arrived via a {...process.env}
+// spread — so tests that set a session id or transcript path DELIBERATELY
+// (session-scoping and transfer tests) keep theirs.
+const AMBIENT_SESSION_VARS = [
+  "CODEX_COMPANION_SESSION_ID",
+  "CURSOR_COMPANION_SESSION_ID",
+  "CODEX_COMPANION_TRANSCRIPT_PATH",
+  "CURSOR_COMPANION_TRANSCRIPT_PATH"
+];
+
 export function run(command, args, options = {}) {
+  const env = { ...(options.env ?? process.env) };
+  for (const name of AMBIENT_SESSION_VARS) {
+    if (env[name] !== undefined && env[name] === process.env[name]) {
+      delete env[name];
+    }
+  }
   return spawnSync(command, args, {
     cwd: options.cwd,
-    env: options.env,
+    env,
     encoding: "utf8",
     input: options.input,
     shell: options.shell ?? (process.platform === "win32" && !path.isAbsolute(command)),

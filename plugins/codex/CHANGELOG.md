@@ -5,6 +5,10 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## Unreleased
+
+- Fixed a stale-cache false positive found on the first real install: the installer writes version 1.0.6+fork.6 into a directory named 1.0.6-fork.6, so the name-vs-version audit flagged the LIVE install as deletable residue. The registry's installPath is now authoritative, with a sanitized-name fallback for entries that lack it.
+
 ## 1.0.6+fork.6
 
 - The codex-delegation skill gained a Brief shape section from the first portfolio retrospective (PR #33): prefer design-to-verdict briefs for analysis delegations and refine by narrowing on a dead run — cited from ledger evidence (0/2 open-ended xhigh briefs survived; 2/2 narrowed retries merged).

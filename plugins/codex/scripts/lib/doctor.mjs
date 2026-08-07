@@ -391,7 +391,15 @@ export function buildPluginInstallChecks(context) {
         key,
         marketplace: key.slice(at + 1),
         recordCount: recordList.length,
-        versions: recordList.map((record) => record?.version).filter((version) => typeof version === "string")
+        versions: recordList.map((record) => record?.version).filter((version) => typeof version === "string"),
+        // The registry's own pointer to the live cache dir. Authoritative for
+        // the stale-cache audit: the installer sanitizes "+" to "-" in dir
+        // names (1.0.6+fork.6 installs at .../1.0.6-fork.6), so a raw
+        // dir-name-vs-version comparison flags the LIVE install as residue —
+        // observed on the first real install of this fork, 2026-08-07.
+        installPaths: recordList
+          .map((record) => record?.installPath)
+          .filter((installPath) => typeof installPath === "string")
       });
     }
     return { state: "ok", matching };
@@ -472,11 +480,22 @@ export function buildPluginInstallChecks(context) {
             unauditable.push(`${cacheDir} (registry entry ${entry.key} records no readable versions)`);
             continue;
           }
+          // A cache dir is registered if the registry's installPath points at
+          // it (authoritative — survives the installer's "+"-to-"-" dir-name
+          // sanitization), or as a fallback if its name matches a recorded
+          // version verbatim or under that same sanitization.
           const recorded = new Set(entry?.versions ?? []);
+          const recordedSanitized = new Set([...recorded].map((version) => version.replace(/\+/g, "-")));
+          const livePaths = new Set((entry?.installPaths ?? []).map((installPath) => path.resolve(installPath)));
           for (const dirent of cached) {
-            if (dirent.isDirectory() && !recorded.has(dirent.name)) {
-              stale.push(path.join(cacheDir, dirent.name));
+            if (!dirent.isDirectory()) {
+              continue;
             }
+            const dirPath = path.join(cacheDir, dirent.name);
+            if (livePaths.has(path.resolve(dirPath)) || recorded.has(dirent.name) || recordedSanitized.has(dirent.name)) {
+              continue;
+            }
+            stale.push(dirPath);
           }
         }
         if (stale.length === 0 && unauditable.length === 0) {

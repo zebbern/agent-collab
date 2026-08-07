@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a stale-cache false positive (mirrored chassis fix — see the codex entry): the installer sanitizes `+` build metadata out of cache directory names, so the name-vs-version audit flagged the LIVE install as deletable residue. The registry's installPath is now authoritative, with a sanitized-name fallback for entries that lack it.
+
 ## 0.5.1
 
 - The cursor-delegation skill gained an evidence-gap note from the first portfolio retrospective (PR #33): Cursor had zero delegate dispositions across the first 8 ledger entries, so fitting increments should be routed its way to build the comparison the routing policy needs.
