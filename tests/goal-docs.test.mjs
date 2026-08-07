@@ -17,7 +17,11 @@ function read(relative) {
 test("goal plugin manifest and marketplace entry agree", () => {
   const plugin = JSON.parse(read(path.join(".claude-plugin", "plugin.json")));
   assert.equal(plugin.name, "goal");
-  assert.equal(plugin.version, "0.2.0");
+  // Agreement, not a literal: this test broke on both releases to date
+  // because it pinned the version string its own name never claimed to pin.
+  // bump-version --check owns coherence; here we assert the two sites agree
+  // and look like a version at all.
+  assert.match(plugin.version, /^\d+\.\d+\.\d+/);
   assert.match(plugin.description, /long-horizon/i);
 
   const marketplace = JSON.parse(
@@ -25,7 +29,7 @@ test("goal plugin manifest and marketplace entry agree", () => {
   );
   const entry = marketplace.plugins.find((candidate) => candidate.name === "goal");
   assert.ok(entry, "marketplace.json has no goal entry");
-  assert.equal(entry.version, "0.2.0");
+  assert.equal(entry.version, plugin.version);
   assert.equal(entry.source, "./plugins/goal");
 });
 
