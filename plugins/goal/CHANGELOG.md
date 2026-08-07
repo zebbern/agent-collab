@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - One canonical ledger root, healed splits: the ledger state root no longer
   honors ambient `CLAUDE_PLUGIN_DATA`. Installed sessions export whichever
