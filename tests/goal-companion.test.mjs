@@ -14,6 +14,7 @@ import {
   saveGoal,
   goalsDir
 } from "../plugins/goal/scripts/lib/goal-state.mjs";
+import { appendLedger, readLedger, stateDir } from "../plugins/goal/scripts/lib/ledger.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "goal", "scripts", "goal-companion.mjs");
@@ -118,4 +119,24 @@ test("a hand-broken goal file refuses with specifics, never repairs", () => {
 
   fs.writeFileSync(file, JSON.stringify({ ...makeGoal(), slug: "different" }));
   assert.throws(() => resolveGoal(project, "test-goal"), /slug .*different.* does not match/);
+});
+
+test("ledger appends under the plugin-data override and tolerates corrupt lines", () => {
+  const project = makeTempDir("goal-proj-");
+  assert.ok(
+    stateDir(project).startsWith(path.join(process.env.CLAUDE_PLUGIN_DATA, "goal-companion")),
+    stateDir(project)
+  );
+
+  assert.deepEqual(readLedger(project), { entries: [], corruptCount: 0 });
+
+  appendLedger(project, { slug: "g", itemId: "i", event: "step-started" });
+  appendLedger(project, { slug: "g", itemId: "i", event: "disposition", disposition: "merged" });
+  fs.appendFileSync(path.join(stateDir(project), "ledger.jsonl"), "{torn write\n");
+
+  const { entries, corruptCount } = readLedger(project);
+  assert.equal(entries.length, 2);
+  assert.equal(corruptCount, 1);
+  assert.equal(entries[0].event, "step-started");
+  assert.ok(typeof entries[0].at === "string" && entries[0].at.includes("T"));
 });
