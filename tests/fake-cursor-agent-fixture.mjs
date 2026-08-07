@@ -68,6 +68,30 @@ if (args[0] === "login") {
   process.exit(0);
 }
 
+// Mirrors the real \`cursor-agent --list-models\` output shape ("<id> - <label>",
+// with an "Available models" header) so the doctor's roster check can verify
+// the pinned profile ids against a fixture instead of degrading to
+// "unauditable". The two ids the cursor profile table pins are present on
+// purpose: a healthy fixture environment must read as healthy, and a profile
+// id going stale must be what turns it red — not the fixture's own ignorance.
+if (args[0] === "--list-models" || args[0] === "models") {
+  if (BEHAVIOR === "roster-missing-profile") {
+    console.log("Available models\\n\\nauto - Auto (default)\\ncomposer-2.5 - Composer 2.5");
+    process.exit(0);
+  }
+  console.log(
+    [
+      "Available models",
+      "",
+      "auto - Auto (default)",
+      "gpt-5.6-sol-xhigh - GPT-5.6 Sol 1M Extra High",
+      "cursor-grok-4.5-high-fast - Cursor Grok 4.5 Fast",
+      "composer-2.5 - Composer 2.5"
+    ].join("\\n")
+  );
+  process.exit(0);
+}
+
 const promptIndex = args.indexOf("-p");
 if (promptIndex === -1 || readFlagValue(args, "--output-format") !== "stream-json") {
   console.error("fake cursor-agent: unsupported invocation: " + args.join(" "));

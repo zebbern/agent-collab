@@ -271,6 +271,80 @@ export function buildStateHygieneChecks(context) {
 }
 
 /**
+ * Warns when a pinned `--profile` model id no longer exists in the
+ * provider's live model roster. Provider-free like buildPluginInstallChecks:
+ * the context injects the profile table and a roster probe so tests never
+ * invoke a real CLI. context: { profiles: {name, id}[], probeRoster,
+ * providerLabel? }.
+ *
+ * probeRoster() returns (or resolves to) one of:
+ *   { status: "no-surface" }        - the provider's CLI exposes no
+ *                                      model-roster command at all (codex-cli
+ *                                      0.146.0: verified live, no
+ *                                      models/list subcommand exists to
+ *                                      call). This is a fact about the tool,
+ *                                      not a broken install — warning on
+ *                                      every healthy Codex install would cry
+ *                                      wolf, so this renders "ok". But that
+ *                                      "ok" describes doctor's own check
+ *                                      running cleanly, never that the ids
+ *                                      were confirmed against a roster: the
+ *                                      message says so explicitly.
+ *   { status: "ok", ids: string[] } - the roster was read and parsed.
+ *   { status: <anything else>, detail? } - the roster command is
+ *                                      unavailable, failed, or returned
+ *                                      nothing parseable. Unknown is not
+ *                                      healthy: this is always a warning
+ *                                      naming the roster unauditable, never
+ *                                      "every id is missing" and never "ok".
+ * A throwing probeRoster is treated the same as an unavailable roster.
+ */
+export function buildModelRosterCheck(context) {
+  const profiles = Array.isArray(context.profiles) ? context.profiles : [];
+  const providerLabel = context.providerLabel ?? "This provider";
+  const names = profiles.map((profile) => profile.name).join(", ") || "none";
+  return {
+    id: "model-roster-pins",
+    run: async () => {
+      let probe;
+      try {
+        probe = await context.probeRoster();
+      } catch (error) {
+        return {
+          status: "warning",
+          message: `Model roster probe for ${providerLabel} threw (${error instanceof Error ? error.message : String(error)}); pinned profile id(s) (${names}) are unauditable — unknown is not healthy.`
+        };
+      }
+      if (!probe || probe.status === "no-surface") {
+        return {
+          status: "ok",
+          message: `${providerLabel} exposes no model-roster command, so pinned profile id(s) (${names}) cannot be checked against a live roster; this reports ok because the check itself ran cleanly, not because the ids were verified.`
+        };
+      }
+      if (probe.status !== "ok" || !Array.isArray(probe.ids) || probe.ids.length === 0) {
+        return {
+          status: "warning",
+          message: `The live ${providerLabel} model roster could not be read (${probe.detail ?? "no parseable ids returned"}); pinned profile id(s) (${names}) are unauditable, not confirmed missing.`
+        };
+      }
+      const rosterIds = new Set(probe.ids);
+      const missing = profiles.filter((profile) => !rosterIds.has(profile.id));
+      if (missing.length === 0) {
+        return {
+          status: "ok",
+          message: `Every pinned profile id is present in the live ${providerLabel} model roster (verified: ${names}).`
+        };
+      }
+      return {
+        status: "warning",
+        message: `${missing.length} pinned profile id(s) are missing from the live ${providerLabel} model roster; update the profile table or pass --model explicitly.`,
+        details: missing.map((profile) => `${profile.name}: ${profile.id}`)
+      };
+    }
+  };
+}
+
+/**
  * Installation-hygiene checks shared by both plugins. The context carries the
  * plugin-specific pieces so this module stays provider-free:
  * { pluginName, pluginsDir } — pluginsDir is <configDir>/plugins, injected so

@@ -12,6 +12,7 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import {
   buildLivenessProbe,
+  buildModelRosterCheck,
   buildPluginInstallChecks,
   buildProcessTableGuard,
   buildStartupOverheadCheck,
@@ -183,6 +184,109 @@ test("the startup-overhead check summarizes per transport and stays informationa
   assert.ok(check.details.some((line) => /wsl: n=1, median 5000ms/.test(line)), JSON.stringify(check.details));
 });
 
+// buildModelRosterCheck: fake roster probes only, never a real CLI. Covers
+// the full contract — all ids present, a missing id, probe failure/absence,
+// garbage/empty output (never read as "all missing"), and the codex
+// no-roster-surface rendering.
+const FAKE_PROFILES = [
+  { name: "deep", id: "gpt-5.6-sol" },
+  { name: "fast", id: "gpt-5.3-codex-spark" }
+];
+
+test("model roster check reports ok and names the verified profiles when every id is present", async () => {
+  const report = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "ok", ids: ["gpt-5.6-sol", "gpt-5.3-codex-spark", "auto"] })
+    })
+  ]);
+  const check = report.checks[0];
+  assert.equal(check.status, "ok");
+  assert.match(check.message, /deep, fast/);
+  assert.match(check.message, /verified/);
+});
+
+test("model roster check warns and names the profile and id when one is missing from the roster", async () => {
+  const report = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "ok", ids: ["gpt-5.3-codex-spark"] })
+    })
+  ]);
+  const check = report.checks[0];
+  assert.equal(check.status, "warning");
+  assert.match(check.message, /1 pinned profile/);
+  assert.match(check.message, /--model/);
+  assert.deepEqual(check.details, ["deep: gpt-5.6-sol"]);
+});
+
+test("model roster check warns the roster is unauditable when the probe fails or is absent, never ok", async () => {
+  const failing = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "error", detail: "fake-cli: command not found" })
+    })
+  ]);
+  assert.equal(failing.checks[0].status, "warning");
+  assert.match(failing.checks[0].message, /unauditable/);
+  assert.match(failing.checks[0].message, /command not found/);
+
+  const throwing = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => {
+        throw new Error("probe exploded");
+      }
+    })
+  ]);
+  assert.equal(throwing.checks[0].status, "warning");
+  assert.match(throwing.checks[0].message, /unauditable/);
+  assert.match(throwing.checks[0].message, /probe exploded/);
+});
+
+test("model roster check treats empty or garbage roster output as unauditable, not as every id missing", async () => {
+  const empty = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "empty", detail: "no parseable ids" })
+    })
+  ]);
+  assert.equal(empty.checks[0].status, "warning");
+  assert.match(empty.checks[0].message, /unauditable/);
+  assert.doesNotMatch(empty.checks[0].message, /pinned profile id\(s\) are missing/);
+  assert.equal(empty.checks[0].details, undefined);
+
+  const garbage = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "fake-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "ok", ids: [] })
+    })
+  ]);
+  assert.equal(garbage.checks[0].status, "warning");
+  assert.match(garbage.checks[0].message, /unauditable/);
+});
+
+test("model roster check renders the honest no-roster-surface ok for codex without implying the ids were checked", async () => {
+  const report = await runDoctorChecks([
+    buildModelRosterCheck({
+      providerLabel: "codex-cli",
+      profiles: FAKE_PROFILES,
+      probeRoster: () => ({ status: "no-surface" })
+    })
+  ]);
+  const check = report.checks[0];
+  assert.equal(check.status, "ok");
+  assert.match(check.message, /no model-roster command/);
+  assert.match(check.message, /not because the ids were verified/);
+  assert.doesNotMatch(check.message, /every pinned profile id is present/i);
+});
+
 // Fake <configDir>/plugins layout matching the real installer:
 // installed_plugins.json maps "<name>@<marketplace>" keys to install-record
 // arrays, and cached copies live under cache/<marketplace>/<name>/<version>/.
@@ -351,10 +455,16 @@ test("doctor --json reports a healthy environment against the fake codex", () =>
     "codex-auth",
     "codex-cli-freshness",
     "broker-residue",
+    "model-roster-pins",
     "plugin-name-collision",
     "plugin-cache-stale",
     "state-lock"
   ]) {
     assert.ok(ids.includes(expected), `missing check ${expected}`);
   }
+  // codex-cli has no roster surface at all, so the check is always the
+  // honest no-surface "ok" rendering, independent of the fake CLI's behavior.
+  const rosterCheck = payload.checks.find((check) => check.id === "model-roster-pins");
+  assert.equal(rosterCheck.status, "ok");
+  assert.match(rosterCheck.message, /no model-roster command/);
 });

@@ -16,6 +16,7 @@ import {
   parseStructuredOutput,
   readOutputSchema,
   reapWslAgent,
+  resolveCursorInvocation,
   runCursorTurn,
   winPathToWsl
 } from "./lib/cursor.mjs";
@@ -39,6 +40,7 @@ import {
   matchesWindowsIdentity,
   probeWindowsProcessIdentity,
   isWindowsProcessIdentity,
+  runCommand,
   terminateProcessTree
 } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -61,6 +63,7 @@ import {
 } from "./lib/job-control.mjs";
 import {
   buildLivenessProbe,
+  buildModelRosterCheck,
   buildPluginInstallChecks,
   buildStartupOverheadCheck,
   buildStateHygieneChecks,
@@ -101,6 +104,62 @@ const TASK_PROFILES = {
   fast: { model: "cursor-grok-4.5-high-fast" }
 };
 const TASK_PROFILE_NAMES = Object.keys(TASK_PROFILES);
+
+// `cursor-agent --list-models` prints one model per line as
+// "<id> - <label>" (e.g. "gpt-5.6-sol-xhigh - GPT-5.6 Sol 1M Extra High",
+// "auto - Auto (default)"); the id is everything before the first " - ".
+function parseCursorModelRosterIds(stdout) {
+  const ids = [];
+  for (const rawLine of String(stdout ?? "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const separatorIndex = line.indexOf(" - ");
+    const id = (separatorIndex === -1 ? line : line.slice(0, separatorIndex)).trim();
+    if (id) {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+// Runs `cursor-agent --list-models` through the same resolved invocation plan
+// a real turn uses (native PATH binary, node-script test fixture, or the WSL
+// fallback — see lib/cursor.mjs's resolveCursorInvocation), so the roster
+// probe never diverges from how the CLI is actually spawned. Only the plan's
+// file+prefix are replayed here (matching every non-cmd-shim plan shape);
+// the cmd-shim plan (a Windows .cmd/.bat shim resolved from PATH) is reported
+// unauditable rather than reimplementing its cmd.exe quoting, since
+// cursor-agent ships no native Windows build and that plan should not occur
+// in practice.
+function probeCursorModelRoster(cwd) {
+  const invocation = resolveCursorInvocation(cwd);
+  if (!invocation.available) {
+    return { status: "error", detail: invocation.detail };
+  }
+  const plan = invocation.plan;
+  if (!plan || plan.kind === "cmd-shim") {
+    return {
+      status: "error",
+      detail: "cursor-agent's resolved invocation is a Windows cmd shim, which the roster probe does not support."
+    };
+  }
+  const result = runCommand(plan.file, [...(plan.prefix ?? []), "--list-models"], { cwd, shell: false });
+  if (result.error || result.status !== 0) {
+    return {
+      status: "error",
+      detail: result.error
+        ? result.error.message
+        : result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`
+    };
+  }
+  const ids = parseCursorModelRosterIds(result.stdout);
+  if (ids.length === 0) {
+    return { status: "empty", detail: "cursor-agent --list-models returned no parseable model ids." };
+  }
+  return { status: "ok", ids };
+}
 
 // Only task/rescue accept --profile. Resolve it once, up front: an unknown or
 // empty explicitly-supplied value must fail loudly before any cursor-agent
@@ -321,6 +380,11 @@ async function handleDoctor(argv) {
         };
       }
     },
+    buildModelRosterCheck({
+      providerLabel: "cursor-agent",
+      profiles: Object.entries(TASK_PROFILES).map(([name, profile]) => ({ name, id: profile.model })),
+      probeRoster: () => probeCursorModelRoster(cwd)
+    }),
     ...buildPluginInstallChecks({
       pluginName: "cursor",
       pluginsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "plugins")
