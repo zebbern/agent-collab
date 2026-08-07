@@ -299,7 +299,10 @@ test("ledger is read-only history: it works on a closed (non-active) goal", () =
   assert.equal(ledger.status, 0, ledger.stderr);
   const payload = JSON.parse(ledger.stdout);
   assert.equal(payload.slug, "test-goal");
-  assert.equal(payload.entries.length, 2);
+  // 2 dispositions (record x2) + 1 closed event from `close --abandoned`.
+  assert.equal(payload.entries.length, 3);
+  assert.equal(payload.entries.at(-1).event, "closed");
+  assert.equal(payload.entries.at(-1).status, "abandoned");
 });
 
 test("record enforces the state machine and blocked halts the goal", () => {
@@ -479,4 +482,147 @@ test("close --done refuses a hand-edited active goal that still carries a blocke
   const done = companion(["close", "test-goal", "--done"], project);
   assert.equal(done.status, 1);
   assert.match(done.stderr, /stuck-item/);
+});
+
+test("close --done appends exactly one closed event carrying the final status", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  companion(["record", "test-goal", "first-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  companion(["record", "test-goal", "second-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  const done = companion(["close", "test-goal", "--done"], project);
+  assert.equal(done.status, 0, done.stderr);
+
+  const { entries } = readLedger(project);
+  const closedEvents = entries.filter((entry) => entry.event === "closed");
+  assert.equal(closedEvents.length, 1);
+  assert.equal(closedEvents[0].slug, "test-goal");
+  assert.equal(closedEvents[0].status, "done");
+});
+
+test("close --abandoned appends exactly one closed event carrying the final status", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  const abandoned = companion(["close", "test-goal", "--abandoned"], project);
+  assert.equal(abandoned.status, 0, abandoned.stderr);
+
+  const { entries } = readLedger(project);
+  const closedEvents = entries.filter((entry) => entry.event === "closed");
+  assert.equal(closedEvents.length, 1);
+  assert.equal(closedEvents[0].slug, "test-goal");
+  assert.equal(closedEvents[0].status, "abandoned");
+});
+
+function writeDraft(overrides) {
+  const draftDir = makeTempDir("goal-plugin-test-draft-");
+  const draftFile = path.join(draftDir, "goal.json");
+  fs.writeFileSync(draftFile, JSON.stringify(overrides));
+  return draftFile;
+}
+
+test("set appends one correction event when a terminal item's delegate is hand-corrected", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const goal = writeGoalFixture(project, {
+    backlog: [
+      {
+        id: "first-item",
+        title: "Do the first thing",
+        status: "merged",
+        disposition: { recordedAt: "2026-08-07T00:00:00.000Z", pr: 10, delegate: "codex", notes: "landed" }
+      },
+      { id: "second-item", title: "Do the second thing", status: "todo", disposition: null }
+    ]
+  });
+
+  const corrected = {
+    ...goal,
+    backlog: goal.backlog.map((item) =>
+      item.id === "first-item"
+        ? { ...item, disposition: { ...item.disposition, delegate: "none" } }
+        : item
+    )
+  };
+  const set = companion(["set", "--file", writeDraft(corrected), "--json"], project);
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal(JSON.parse(set.stdout).corrections, 1);
+
+  const { entries } = readLedger(project);
+  const corrections = entries.filter((entry) => entry.event === "correction");
+  assert.equal(corrections.length, 1);
+  assert.equal(corrections[0].slug, "test-goal");
+  assert.equal(corrections[0].itemId, "first-item");
+  assert.equal(corrections[0].field, "disposition.delegate");
+  assert.equal(corrections[0].from, "codex");
+  assert.equal(corrections[0].to, "none");
+});
+
+test("set appends no correction when nothing terminal changed", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const goal = writeGoalFixture(project, {
+    backlog: [
+      {
+        id: "first-item",
+        title: "Do the first thing",
+        status: "merged",
+        disposition: { recordedAt: "2026-08-07T00:00:00.000Z", pr: 10, delegate: "codex", notes: "landed" }
+      },
+      { id: "second-item", title: "Do the second thing", status: "todo", disposition: null }
+    ]
+  });
+
+  const unchanged = { ...goal, statement: "Prove the goal machinery works (reworded)" };
+  const set = companion(["set", "--file", writeDraft(unchanged), "--json"], project);
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal(JSON.parse(set.stdout).corrections, 0);
+
+  const { entries } = readLedger(project);
+  assert.equal(entries.filter((entry) => entry.event === "correction").length, 0);
+});
+
+test("set over a brand-new slug with no prior goal on disk appends no correction and does not crash", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const draft = makeGoal({ slug: "brand-new-goal" });
+  const set = companion(["set", "--file", writeDraft(draft), "--json"], project);
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal(JSON.parse(set.stdout).corrections, 0);
+
+  const { entries } = readLedger(project);
+  assert.equal(entries.filter((entry) => entry.event === "correction").length, 0);
+});
+
+test("set truncates long notes in a correction line to ~120 chars", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const longFrom = "f".repeat(200);
+  const longTo = "t".repeat(200);
+  const goal = writeGoalFixture(project, {
+    backlog: [
+      {
+        id: "first-item",
+        title: "Do the first thing",
+        status: "merged",
+        disposition: { recordedAt: "2026-08-07T00:00:00.000Z", delegate: "codex", notes: longFrom }
+      },
+      { id: "second-item", title: "Do the second thing", status: "todo", disposition: null }
+    ]
+  });
+
+  const corrected = {
+    ...goal,
+    backlog: goal.backlog.map((item) =>
+      item.id === "first-item"
+        ? { ...item, disposition: { ...item.disposition, notes: longTo } }
+        : item
+    )
+  };
+  const set = companion(["set", "--file", writeDraft(corrected), "--json"], project);
+  assert.equal(set.status, 0, set.stderr);
+
+  const { entries } = readLedger(project);
+  const notesCorrection = entries.find(
+    (entry) => entry.event === "correction" && entry.field === "disposition.notes"
+  );
+  assert.ok(notesCorrection, "expected a disposition.notes correction");
+  assert.ok(notesCorrection.from.length <= 121, notesCorrection.from);
+  assert.ok(notesCorrection.to.length <= 121, notesCorrection.to);
+  assert.ok(notesCorrection.from.endsWith("…"), notesCorrection.from);
+  assert.ok(notesCorrection.to.endsWith("…"), notesCorrection.to);
 });

@@ -85,6 +85,21 @@ test("goal retro command pins its frontmatter and hard rules", () => {
   assert.match(retro, /skill wording, routing guidance, effort tiers, budgets/);
 });
 
+test("goal retro command pins the four-event ledger vocabulary and the goal-file-wins rule", () => {
+  const retro = read(path.join("commands", "retro.md"));
+  // The ledger's full event vocabulary, named together.
+  assert.match(retro, /`step-started`, `disposition`, `closed`, and\n`correction`/);
+  // A correction is an append-only reversal, never a rewrite.
+  assert.match(retro, /never rewrites history/);
+  assert.match(retro, /supersedes/);
+  // Goal file is ground truth over the ledger.
+  assert.match(retro, /goal file wins/i);
+  assert.match(retro, /portable ground truth/);
+  // closed events feed the retro's goal-level analysis.
+  assert.match(retro, /Goal-level outcomes and their timing/);
+  assert.match(retro, /`closed` event/);
+});
+
 test("README documents the goal plugin", () => {
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   assert.match(readme, /## Goal plugin/);

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Ledger corrections: dogfooding this plugin surfaced two dispositions
+  recorded with a wrong `--delegate` value (claiming codex/cursor for work
+  Claude subagents actually did). The goal file was hand-corrected, but the
+  ledger is append-only with no way to fix the poisoned entries in place —
+  `/goal:retro` would have read the wrong values as fact. `set` now loads
+  whatever goal is on disk before overwriting it, diffs terminal backlog
+  items present in both, and appends one `{ event: "correction", slug,
+  itemId, field, from, to }` line per changed `status` /
+  `disposition.delegate` / `disposition.pr` / `disposition.notes` — an
+  accounting-style reversal, never a rewrite (long `notes` values are
+  truncated to ~120 chars in the correction line). A first-time `set` with
+  no prior goal on disk records no corrections. `close` now also appends a
+  `{ event: "closed", slug, status }` line so goal-level outcomes (done /
+  abandoned) live in the ledger, not only in git. `/goal:retro` is updated
+  to treat the goal file as ground truth: a `correction` supersedes the
+  `disposition` it corrects, and attribution must be computed from
+  corrected values, never the raw first write.
 - Unattended-operation recipe documented in `/goal:step`: work happens on a
   `goal/<slug>/<itemId>` branch, an unattended step never merges PRs, and the
   next wake reconciles the PR (merged/closed/still-open) before stepping

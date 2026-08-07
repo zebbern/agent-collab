@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 import { parseCommandInput, resolveCommandCwd } from "./lib/args.mjs";
-import { resolveGoal, saveGoal, validateGoal } from "./lib/goal-state.mjs";
+import { resolveGoal, saveGoal, validateGoal, TERMINAL_ITEM_STATUSES } from "./lib/goal-state.mjs";
 import { appendLedger, readLedger } from "./lib/ledger.mjs";
 
 function printUsage() {
@@ -47,6 +47,87 @@ function countItems(goal) {
   return counts;
 }
 
+// Shared one-line rendering for all four ledger event shapes
+// (step-started, disposition, closed, correction). Each field is only
+// appended when present, so an event missing e.g. itemId never renders the
+// literal string "undefined".
+function formatLedgerLine(entry) {
+  const segments = [entry.event];
+  if (entry.disposition) segments.push(entry.disposition);
+  if (entry.status) segments.push(entry.status);
+  if (entry.itemId) segments.push(entry.itemId);
+  if (entry.field) segments.push(entry.field);
+  if (entry.event === "correction") {
+    const from = entry.from === undefined ? "(unset)" : entry.from;
+    const to = entry.to === undefined ? "(unset)" : entry.to;
+    segments.push(`${from} -> ${to}`);
+  }
+  if (entry.pr) segments.push(`PR#${entry.pr}`);
+  if (entry.delegate) segments.push(`via ${entry.delegate}`);
+  return `${entry.at} ${segments.join(" ")}`;
+}
+
+const CORRECTION_DISPOSITION_FIELDS = ["delegate", "pr", "notes"];
+const NOTES_TRUNCATE_LENGTH = 120;
+
+function truncateForLedger(value) {
+  if (typeof value !== "string" || value.length <= NOTES_TRUNCATE_LENGTH) {
+    return value;
+  }
+  return `${value.slice(0, NOTES_TRUNCATE_LENGTH)}…`;
+}
+
+// Correction events are an accounting-style reversal: they never rewrite an
+// earlier `disposition`/`closed` line, they append after it. Only items
+// terminal in BOTH the prior goal file and the incoming draft are compared —
+// that is what "correcting an already-recorded disposition" means; an item
+// that was never terminal has no disposition of record to correct.
+function diffTerminalCorrections(priorGoal, nextGoal) {
+  if (!priorGoal) {
+    return [];
+  }
+  const priorById = new Map(priorGoal.backlog.map((item) => [item.id, item]));
+  const corrections = [];
+  for (const nextItem of nextGoal.backlog) {
+    const priorItem = priorById.get(nextItem.id);
+    if (!priorItem) continue;
+    if (
+      !TERMINAL_ITEM_STATUSES.includes(priorItem.status) ||
+      !TERMINAL_ITEM_STATUSES.includes(nextItem.status)
+    ) {
+      continue;
+    }
+    if (priorItem.status !== nextItem.status) {
+      corrections.push({ itemId: nextItem.id, field: "status", from: priorItem.status, to: nextItem.status });
+    }
+    for (const field of CORRECTION_DISPOSITION_FIELDS) {
+      const from = priorItem.disposition?.[field];
+      const to = nextItem.disposition?.[field];
+      if (from === to) continue;
+      corrections.push({
+        itemId: nextItem.id,
+        field: `disposition.${field}`,
+        from: field === "notes" ? truncateForLedger(from) : from,
+        to: field === "notes" ? truncateForLedger(to) : to
+      });
+    }
+  }
+  return corrections;
+}
+
+// A missing, unreadable, or schema-invalid prior goal is simply "no prior" —
+// never a crash, and never treated as a correction source. This is the same
+// tolerance resolveGoal/loadGoal already apply to hand-edited files; here we
+// just swallow the refusal instead of surfacing it, because "no prior" is a
+// legitimate first-time `set`, not an error.
+function loadPriorGoalForCorrection(cwd, slug) {
+  try {
+    return resolveGoal(cwd, slug).goal;
+  } catch {
+    return null;
+  }
+}
+
 async function handleSet(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "file"],
@@ -67,10 +148,19 @@ async function handleSet(argv) {
   if (errors.length > 0) {
     throw new Error(`Refusing to set an invalid goal:\n  - ${errors.join("\n  - ")}`);
   }
+  // Load whatever is currently on disk BEFORE it gets overwritten below —
+  // this is the only chance to diff against it.
+  const priorGoal = loadPriorGoalForCorrection(cwd, draft.slug);
+  const corrections = diffTerminalCorrections(priorGoal, draft);
   const file = saveGoal(cwd, draft);
+  for (const correction of corrections) {
+    appendLedger(cwd, { slug: draft.slug, event: "correction", ...correction });
+  }
   output(
-    { slug: draft.slug, file },
-    `Goal "${draft.slug}" written to ${file}.\n`,
+    { slug: draft.slug, file, corrections: corrections.length },
+    `Goal "${draft.slug}" written to ${file}.${
+      corrections.length > 0 ? ` ${corrections.length} correction(s) recorded to the ledger.` : ""
+    }\n`,
     options.json
   );
 }
@@ -100,9 +190,7 @@ async function handleStatus(argv) {
     goal.statement,
     `Items: ${counts.todo} todo, ${counts["in-progress"]} in-progress, ${counts.merged} merged, ${counts.discarded} discarded, ${counts.dropped} dropped, ${counts.blocked} blocked.`,
     inProgress ? `In progress: ${inProgress.id} — ${inProgress.title}` : "Nothing in progress.",
-    ...goalEntries
-      .slice(-3)
-      .map((entry) => `-> ${entry.at} ${entry.event}${entry.disposition ? ` ${entry.disposition}` : ""} ${entry.itemId}`),
+    ...goalEntries.slice(-3).map((entry) => `-> ${formatLedgerLine(entry)}`),
     corruptCount > 0 ? `Ledger: ${corruptCount} corrupt line(s) skipped.` : null
   ].filter((line) => line !== null);
   output(payload, `${lines.join("\n")}\n`, options.json);
@@ -303,10 +391,7 @@ async function handleLedger(argv) {
   const { entries, corruptCount } = readLedger(cwd);
   const goalEntries = entries.filter((entry) => entry.slug === slug);
   const lines = [
-    ...goalEntries.map(
-      (entry) =>
-        `${entry.at} ${entry.event}${entry.disposition ? ` ${entry.disposition}` : ""} ${entry.itemId}${entry.pr ? ` PR#${entry.pr}` : ""}${entry.delegate ? ` via ${entry.delegate}` : ""}`
-    ),
+    ...goalEntries.map((entry) => formatLedgerLine(entry)),
     corruptCount > 0 ? `Ledger: ${corruptCount} corrupt line(s) skipped.` : null
   ].filter((line) => line !== null);
   output(
@@ -366,6 +451,7 @@ async function handleClose(argv) {
   }
   goal.blockedReason = null;
   saveGoal(cwd, goal);
+  appendLedger(cwd, { slug, event: "closed", status: goal.status });
   output({ slug, status: goal.status }, `Goal "${slug}" closed as ${goal.status}.\n`, options.json);
 }
 
