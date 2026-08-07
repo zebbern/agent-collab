@@ -1255,3 +1255,179 @@ test("result for a finished write-capable task returns the raw Codex final respo
   assert.match(result.stdout, /Codex session ID: thr_[a-z0-9]+/i);
   assert.match(result.stdout, /Resume in Codex: codex resume thr_[a-z0-9]+/i);
 });
+
+// resolveResultJob's terminal-status match used to throw "No job found" for
+// any reference outside that predicate, which pre-empted the active-job
+// check below it — a RUNNING or QUEUED job id read back as if it did not
+// exist at all (observed live 2026-08-07). These pin the honest wording.
+test("result on a job id that is still running reports it as running, not missing", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(jobsDir, "task-running.json"),
+    JSON.stringify({ id: "task-running", status: "running", title: "Codex Task" }, null, 2),
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-running",
+            status: "running",
+            pid: 999999,
+            title: "Codex Task",
+            createdAt: "2026-08-07T15:00:00.000Z",
+            updatedAt: "2026-08-07T15:00:30.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const result = run("node", [SCRIPT, "result", "task-running"], {
+    cwd: workspace
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /still running/);
+  assert.match(result.stderr, /\/codex:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+test("result on a job id that is still queued reports it as queued, not missing", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(jobsDir, "task-queued.json"),
+    JSON.stringify({ id: "task-queued", status: "queued", title: "Codex Task" }, null, 2),
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-queued",
+            status: "queued",
+            pid: null,
+            title: "Codex Task",
+            createdAt: "2026-08-07T15:00:00.000Z",
+            updatedAt: "2026-08-07T15:00:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const result = run("node", [SCRIPT, "result", "task-queued"], {
+    cwd: workspace
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /still queued/);
+  assert.match(result.stderr, /\/codex:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+test("result on a finished job whose stored result file is missing reports it honestly", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+  // Intentionally no jobs/task-done.json: the index still lists the job as
+  // completed, but its per-job result file is gone (pruned or quarantined).
+
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-done",
+            status: "completed",
+            title: "Codex Task",
+            createdAt: "2026-08-07T15:00:00.000Z",
+            updatedAt: "2026-08-07T15:01:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const result = run("node", [SCRIPT, "result", "task-done"], {
+    cwd: workspace
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /task-done/);
+  assert.match(result.stderr, /completed/);
+  assert.match(result.stderr, /(pruned|quarantined)/);
+  assert.match(result.stderr, /\/codex:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+// Same class as the result path: resolveCancelableJob filtered to active jobs
+// before matching, so cancelling an already-finished id reported it as
+// unknown. A finished job is not a missing job.
+test("cancel on an already-finished job id says it is finished, not missing", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-finished",
+            status: "completed",
+            title: "Codex Task",
+            createdAt: "2026-08-07T15:00:00.000Z",
+            updatedAt: "2026-08-07T15:01:00.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const cancelled = run("node", [SCRIPT, "cancel", "task-finished"], { cwd: workspace });
+  assert.notEqual(cancelled.status, 0);
+  assert.match(cancelled.stderr, /task-finished is already completed/);
+  assert.doesNotMatch(cancelled.stderr, /No job found/);
+
+  const unknown = run("node", [SCRIPT, "cancel", "task-nope"], { cwd: workspace });
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /No active job found for "task-nope"/);
+});
