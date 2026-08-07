@@ -66,6 +66,7 @@ import {
 } from "./lib/job-control.mjs";
 import {
   buildLivenessProbe,
+  buildModelRosterCheck,
   buildPluginInstallChecks,
   buildProcessTableGuard,
   buildStartupOverheadCheck,
@@ -381,6 +382,15 @@ async function handleDoctor(argv) {
         };
       }
     },
+    // codex-cli 0.146.0 exposes no model-roster command (verified live: no
+    // models/list subcommand), so this always reports the honest "no-surface"
+    // rendering — never a warning that would cry wolf on every healthy
+    // install, never an "ok" that implies the ids were confirmed.
+    buildModelRosterCheck({
+      providerLabel: "codex-cli",
+      profiles: [...TASK_PROFILES].map(([name, profile]) => ({ name, id: profile.model })),
+      probeRoster: () => ({ status: "no-surface" })
+    }),
     ...buildPluginInstallChecks({
       pluginName: "codex",
       pluginsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "plugins")
