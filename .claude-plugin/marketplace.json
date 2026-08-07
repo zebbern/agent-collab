@@ -25,6 +25,15 @@
         "name": "zebbern"
       },
       "source": "./plugins/cursor"
+    },
+    {
+      "name": "goal",
+      "description": "Set a long-horizon goal in a project and advance it one increment at a time, delegating to Codex/Cursor.",
+      "version": "0.1.0",
+      "author": {
+        "name": "zebbern"
+      },
+      "source": "./plugins/goal"
     }
   ]
 }
