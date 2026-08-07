@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2
 
 - **One canonical state root per user** (`~/.claude/cursor-companion`, override `CURSOR_COMPANION_STATE_ROOT` for test isolation; mirrored chassis fix — see the codex entry for the full mechanism): job state and startup metrics no longer resolve their root from ambient `CLAUDE_PLUGIN_DATA`. The cursor plugin ships no hooks, so its Bash invocations always inherited whatever dir the codex plugin's hook exported — a real cursor job and cursor startup metrics were found stored inside codex's per-install data dir, and cross-session `status`/`cancel` could miss live jobs entirely. Legacy-shard healing imports cursor-stamped metric rows (one-time `metrics.jsonl.migrated-cursor` marker, codex rows left for its own pass) and adopts legacy config while the canonical index does not exist yet; job records stay put, surfaced by the new `/cursor:doctor` `state-root-residue` check and by "No job found" misses naming the legacy shard.
 - Fixed a stale-cache false positive (mirrored chassis fix — see the codex entry): the installer sanitizes `+` build metadata out of cache directory names, so the name-vs-version audit flagged the LIVE install as deletable residue. The registry's installPath is now authoritative, with a sanitized-name fallback for entries that lack it.
