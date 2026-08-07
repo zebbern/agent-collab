@@ -66,6 +66,16 @@ Bash({
 - `adversarial-review [--base <ref>] [focus text]` detaches the same way.
 - The run still records a tracked job, so `status` and `result` work on it afterwards.
 
+## Brief shape
+
+- Prefer a **design-to-verdict** brief for analysis delegations — hand Codex a
+  concrete design and ask for numbered verdicts and corrections — over an
+  open-ended "design everything" ask. When a delegated run goes likely-dead
+  or hangs, refine by **narrowing** the ask (and dropping to `--effort high`
+  for verdict checks), never by re-sending the same brief. Ledger evidence,
+  2026-08-07: two open-ended `xhigh` analysis briefs died or hung; both
+  narrowed re-delegations returned approve-with-corrections and merged.
+
 ## Routing
 
 - Deep analysis, security review, architecture validation → `task` or `adversarial-review`; raise `--effort` when a verdict needs more depth.

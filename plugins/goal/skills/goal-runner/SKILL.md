@@ -15,6 +15,10 @@ Policy:
   `record` → stop. The companion refuses a second in-progress item; do not
   work around the refusal.
 - **Disclose.** Announce each increment (and each delegation) in one line.
+- **Start before working.** Call `start` before any work on the increment
+  begins — including delegated work — or the ledger's step-started→disposition
+  gap understates reality and the retro must discard it. Ledger evidence,
+  2026-08-07: one of eight durations read 0min because work preceded `start`.
 - **Delegate with judgment.** Trivial work stays local. Deep analysis or a
   second opinion goes to Codex, fast parallel implementation to Cursor, via
   the `codex-delegation` / `cursor-delegation` skills. Analysis and
