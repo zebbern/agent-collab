@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "slug": "measure-the-loop",
+  "statement": "Make the outer loop measure itself: retrospectives leave a ledger trace, and every future retro must evaluate whether previously adopted method changes actually worked before proposing new ones — turning method-invention from a one-way ratchet into experiments with results.",
+  "acceptanceCriteria": [
+    {
+      "kind": "command",
+      "run": "node --test tests/goal-companion.test.mjs tests/goal-docs.test.mjs tests/import-closure.test.mjs",
+      "expect": "exit0",
+      "timeoutMs": 600000
+    },
+    {
+      "kind": "manual",
+      "text": "A real portfolio retro runs end to end with the new mandate: it evaluates the PR #33 adoption (expecting the honest too-thin verdict), and records itself via retro-record"
+    }
+  ],
+  "backlog": [
+    {
+      "id": "retro-events",
+      "title": "retro-record subcommand + the evaluate-prior-adoptions mandate in retro.md",
+      "detail": "(1) New goal-companion subcommand `retro-record [slug|--all] [--pr N] [--findings N] [--notes ...]`: appends a fifth ledger event `{event:'retro', scope:'portfolio'|'per-goal', slug? (per-goal only), dispositions:N, floorMet:bool, pr?, findings?, notes?}`. The companion COUNTS dispositions at the recorded scope itself at invocation time (never trusts a caller-supplied count) and derives floorMet (>=5). Recording a floor-refused run is valid and useful — a refusal is a data point. Scope resolution mirrors `ledger` exactly (--all = portfolio, slug or sole-goal = per-goal; --all with a slug refuses; empty project refuses). (2) formatLedgerLine renders retro events cleanly (scope, dispositions, floorMet, PR#, findings) — no 'undefined'. (3) retro.md: the event vocabulary becomes FIVE (update the four-event sentence and its pin); a new mandatory analysis step BEFORE proposing anything: read prior `retro` events, and for each with a proposal PR, compare outcomes before vs after that PR's mergedAt (merge rate, blocked rate, durations, refine-once frequency, delegate mix) — with its own honesty floor: fewer than 3 dispositions on either side of an adoption point means 'too thin to judge this adoption yet', said plainly; a prior proposal showing no improvement or regression makes proposing its reversal a legitimate finding; and every retro run ends by recording itself via retro-record (a retro that leaves no trace cannot be evaluated by its successor). (4) Tests: retro-record portfolio + per-goal cases with the count computed from seeded events (not trusted), floor-unmet case, refusal cases mirroring ledger, clean rendering; goal-docs pins for the five-event vocabulary, the evaluate-prior-adoptions step, the 3-per-side adoption floor, and the record-itself rule. (5) plugins/goal/CHANGELOG.md Unreleased entry.",
+      "status": "todo",
+      "disposition": null
+    }
+  ],
+  "budget": {
+    "perStepDelegations": 2
+  },
+  "status": "active",
+  "blockedReason": null,
+  "createdAt": "2026-08-07T16:51:23.127Z",
+  "updatedAt": "2026-08-07T16:51:23.128Z"
+}
