@@ -32,8 +32,8 @@
   "budget": {
     "perStepDelegations": 2
   },
-  "status": "active",
+  "status": "done",
   "blockedReason": null,
   "createdAt": "2026-08-07T02:07:41.247Z",
-  "updatedAt": "2026-08-07T02:52:40.496Z"
+  "updatedAt": "2026-08-07T02:54:23.098Z"
 }
