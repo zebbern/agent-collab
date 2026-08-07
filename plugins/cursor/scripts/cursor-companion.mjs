@@ -14,6 +14,7 @@ import {
   getCursorAuthStatus,
   getCursorAvailability,
   parseStructuredOutput,
+  planCommandLine,
   readOutputSchema,
   reapWslAgent,
   resolveCursorInvocation,
@@ -145,7 +146,13 @@ function probeCursorModelRoster(cwd) {
       detail: "cursor-agent's resolved invocation is a Windows cmd shim, which the roster probe does not support."
     };
   }
-  const result = runCommand(plan.file, [...(plan.prefix ?? []), "--list-models"], { cwd, shell: false });
+  // The command line comes from cursor.mjs's own plan builder — the probe
+  // must never replay that construction by hand, or a plan-shape change
+  // strands it silently. The cmd-shim guard above stays: planCommandLine can
+  // express a shim, but runCommand cannot carry its windowsVerbatimArguments
+  // option through to spawnSync.
+  const line = planCommandLine(plan, ["--list-models"]);
+  const result = runCommand(line.file, line.args, { cwd, shell: false });
   if (result.error || result.status !== 0) {
     return {
       status: "error",
