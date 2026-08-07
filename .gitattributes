@@ -1,0 +1,20 @@
+# Normalize every text file to LF in the working tree on every platform.
+#
+# Without this, a Windows checkout gets CRLF while Linux gets LF, and this
+# repo is unusually sensitive to that: doc contract tests pin exact strings
+# (some spanning a line break), and tests/chassis-drift.test.mjs hashes the
+# +/- payload of a git diff between the two plugins' mirrored lib copies.
+# Byte-level guards must not depend on which line ending the checkout used.
+#
+# This was not theoretical: on 2026-08-07 a pin containing a literal \n
+# turned windows-latest CI red while the local gate stayed green, because
+# both of its legs read an already-LF working tree and neither could observe
+# a fresh CRLF checkout.
+* text=auto eol=lf
+
+# Binary assets: never touched.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
