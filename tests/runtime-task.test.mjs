@@ -594,7 +594,7 @@ test("task --profile deep resolves to gpt-5.6-sol at xhigh effort", () => {
   assert.equal(fakeState.lastTurnStart.effort, "xhigh");
 });
 
-test("task --profile fast resolves to gpt-5.3-codex-spark and leaves effort unset", () => {
+test("task --profile fast resolves to gpt-5.3-codex-spark at medium effort", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   const statePath = path.join(binDir, "fake-codex-state.json");
@@ -612,7 +612,12 @@ test("task --profile fast resolves to gpt-5.3-codex-spark and leaves effort unse
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
-  assert.equal(fakeState.lastTurnStart.effort, null);
+  // Pinned, not inherited: an unset effort falls through to the user's
+  // ~/.codex default, and a default above xhigh (ultra/max) is rejected by
+  // the spark model with an API 400 (observed live 2026-08-08). Profiles
+  // are fully specified so user config can never produce an unsupported
+  // combination; an explicit --effort still overrides.
+  assert.equal(fakeState.lastTurnStart.effort, "medium");
 });
 
 test("task explicit --model and --effort override the profile defaults", () => {
