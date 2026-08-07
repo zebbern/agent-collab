@@ -91,7 +91,14 @@ if (skipLinux) {
       [
         "run", "--rm", "-v", mount, "node:22",
         "bash", "-lc",
-        "cp -r /repo /work && cd /work && node scripts/run-tests.mjs > /tmp/suite.log 2>&1; status=$?; " +
+        // .git is excluded from the copy: from a git WORKTREE it is a pointer
+        // file whose target does not exist in the container, which kills every
+        // git invocation (the chassis-drift guard's `git diff --no-index`
+        // died with exit 128 and hashed empty diffs). No test needs the
+        // repo's git history, and --no-index works with no repo at all —
+        // excluding it also skips copying the object DB into the container.
+        "mkdir /work && tar -C /repo --exclude=./.git -cf - . | tar -C /work -xf - && " +
+          "cd /work && node scripts/run-tests.mjs > /tmp/suite.log 2>&1; status=$?; " +
           "grep -E '^not ok' /tmp/suite.log; grep -E '^# (tests|pass|fail|skipped)' /tmp/suite.log; exit $status"
       ],
       { shell: false }

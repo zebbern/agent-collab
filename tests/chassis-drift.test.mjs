@@ -46,9 +46,17 @@ function divergenceDigest(module) {
   const result = spawnSync("git", ["diff", "--no-index", "--unified=0", codexPath, cursorPath], {
     encoding: "utf8"
   });
-  // git diff --no-index exits 1 when the files differ; only a missing git or
-  // an unreadable file is a real error.
   assert.equal(result.error ?? null, null);
+  // git diff --no-index exits 0 (identical) or 1 (differ). Anything else
+  // means git DIED before diffing — e.g. exit 128 when repo discovery hits a
+  // worktree's .git pointer file whose target does not exist (the docker leg
+  // copies the tree, not the repo it points into). A dead git's empty stdout
+  // hashes to the empty-diff digest, which would silently PASS the
+  // byte-identical pins while misreporting the divergent ones — so refuse it.
+  assert.ok(
+    result.status === 0 || result.status === 1,
+    `git diff --no-index died (exit ${result.status}) for lib/${module}: ${result.stderr}`
+  );
   const payload = (result.stdout ?? "")
     .split("\n")
     .filter((line) => (line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---"))
