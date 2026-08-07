@@ -402,6 +402,77 @@ test("status renders the model line and the cursor-agent resume handoff", () => 
   assert.match(stored.stdout, new RegExp(`Next: /cursor:status ${job.id} for job details`));
 });
 
+// resolveResultJob's terminal-status match used to throw "No job found" for
+// any reference outside that predicate, which pre-empted the active-job
+// check below it — a RUNNING or QUEUED job id read back as if it did not
+// exist at all (observed live 2026-08-07 on the codex plugin; mirrored fix
+// applied here by hand). These pin the honest wording.
+test("result on a job id that is still running reports it as running, not missing", () => {
+  const repo = makeTempDir("cursor-plugin-test-");
+  upsertJob(repo, { id: "task-running", status: "running", jobClass: "task", pid: 999999, title: "Cursor Task" });
+  writeJobFile(repo, "task-running", { id: "task-running", status: "running" });
+
+  const result = run("node", [SCRIPT, "result", "task-running"], {
+    cwd: repo
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /still running/);
+  assert.match(result.stderr, /\/cursor:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+test("result on a job id that is still queued reports it as queued, not missing", () => {
+  const repo = makeTempDir("cursor-plugin-test-");
+  upsertJob(repo, { id: "task-queued", status: "queued", jobClass: "task", pid: null, title: "Cursor Task" });
+  writeJobFile(repo, "task-queued", { id: "task-queued", status: "queued" });
+
+  const result = run("node", [SCRIPT, "result", "task-queued"], {
+    cwd: repo
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /still queued/);
+  assert.match(result.stderr, /\/cursor:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+test("result on a finished job whose stored result file is missing reports it honestly", () => {
+  const repo = makeTempDir("cursor-plugin-test-");
+  // Index the job as completed via upsertJob, but never call writeJobFile —
+  // the per-job result file is gone (pruned or quarantined) while the index
+  // still lists it.
+  upsertJob(repo, { id: "task-done", status: "completed", jobClass: "task", title: "Cursor Task" });
+
+  const result = run("node", [SCRIPT, "result", "task-done"], {
+    cwd: repo
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /task-done/);
+  assert.match(result.stderr, /completed/);
+  assert.match(result.stderr, /(pruned|quarantined)/);
+  assert.match(result.stderr, /\/cursor:status/);
+  assert.doesNotMatch(result.stderr, /No job found/);
+});
+
+// Same class as the result path: resolveCancelableJob filtered to active jobs
+// before matching, so cancelling an already-finished id reported it as
+// unknown. A finished job is not a missing job.
+test("cancel on an already-finished job id says it is finished, not missing", () => {
+  const repo = makeTempDir("cursor-plugin-test-");
+  upsertJob(repo, { id: "task-finished", status: "completed", jobClass: "task", title: "Cursor Task" });
+
+  const cancelled = run("node", [SCRIPT, "cancel", "task-finished"], { cwd: repo });
+  assert.notEqual(cancelled.status, 0);
+  assert.match(cancelled.stderr, /task-finished is already completed/);
+  assert.doesNotMatch(cancelled.stderr, /No job found/);
+
+  const unknown = run("node", [SCRIPT, "cancel", "task-nope"], { cwd: repo });
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /No active job found for "task-nope"/);
+});
+
 test("review runs read-only and renders structured findings", () => {
   const repo = makeReviewRepo();
   const binDir = makeTempDir();

@@ -342,7 +342,7 @@ export function readStoredJob(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
-function matchJobReference(jobs, reference, predicate = () => true) {
+function matchJobReference(jobs, reference, predicate = () => true, options = {}) {
   const filtered = jobs.filter(predicate);
   if (!reference) {
     return filtered[0] ?? null;
@@ -359,6 +359,15 @@ function matchJobReference(jobs, reference, predicate = () => true) {
   }
   if (prefixMatches.length > 1) {
     throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
+  }
+
+  // allowMissing: return null instead of throwing when this predicate simply
+  // excludes the job (e.g. it's running, not finished) — callers that probe
+  // multiple predicates in sequence (resolveResultJob) need to tell "doesn't
+  // exist at all" apart from "exists, just not in this bucket" so the next
+  // predicate actually gets a chance to run.
+  if (options.allowMissing) {
+    return null;
   }
 
   throw new Error(`No job found for "${reference}". Run /cursor:status to list known jobs.`);
@@ -394,7 +403,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const selected = matchJobReference(jobs, reference);
+  const selected = matchJobReference(jobs, reference, undefined, { allowMissing: true });
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /cursor:status to inspect known jobs.`);
   }
@@ -409,17 +418,36 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 export function resolveResultJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+
+  // allowMissing: a reference that names a RUNNING or QUEUED job must not be
+  // reported as "no job found" — without it, this call throws before the
+  // active-job check below ever runs, which is the bug (a running job read
+  // back as missing). The ambiguous-reference throw is unaffected.
   const selected = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled",
+    { allowMissing: true }
   );
 
   if (selected) {
+    // The job index can outlive the per-job result file (crash mid-write,
+    // quarantine, manual cleanup of the jobs dir) — say so plainly instead of
+    // rendering a quiet "no captured result payload" as if nothing were wrong.
+    if (!readStoredJob(workspaceRoot, selected.id)) {
+      throw new Error(
+        `Job ${selected.id} finished with status "${selected.status}", but its stored result is missing (pruned or quarantined). Run /cursor:status ${selected.id} to see what's left.`
+      );
+    }
     return { workspaceRoot, job: selected };
   }
 
-  const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
+  const active = matchJobReference(
+    jobs,
+    reference,
+    (job) => job.status === "queued" || job.status === "running",
+    { allowMissing: true }
+  );
   if (active) {
     throw new Error(`Job ${active.id} is still ${active.status}. Check /cursor:status and try again once it finishes.`);
   }
@@ -437,11 +465,18 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
 
   if (reference) {
-    const selected = matchJobReference(activeJobs, reference);
-    if (!selected) {
-      throw new Error(`No active job found for "${reference}".`);
+    // Same distinction the result path needs: a finished job is not a missing
+    // job. Probe the active bucket first, then fall back to every job so an
+    // already-terminal id is reported as terminal instead of as unknown.
+    const selected = matchJobReference(activeJobs, reference, undefined, { allowMissing: true });
+    if (selected) {
+      return { workspaceRoot, job: selected };
     }
-    return { workspaceRoot, job: selected };
+    const known = matchJobReference(jobs, reference, undefined, { allowMissing: true });
+    if (known) {
+      throw new Error(`Job ${known.id} is already ${known.status}; there is nothing to cancel.`);
+    }
+    throw new Error(`No active job found for "${reference}".`);
   }
 
   const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);
