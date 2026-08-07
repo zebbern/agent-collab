@@ -87,8 +87,13 @@ test("goal retro command pins its frontmatter and hard rules", () => {
 
 test("goal retro command pins the four-event ledger vocabulary and the goal-file-wins rule", () => {
   const retro = read(path.join("commands", "retro.md"));
-  // The ledger's full event vocabulary, named together.
-  assert.match(retro, /`step-started`, `disposition`, `closed`, and\n`correction`/);
+  // The ledger's full event vocabulary, named together. \s+ rather than a
+  // literal \n: this phrase wraps a line, and a Windows checkout without a
+  // .gitattributes normalizer reads CRLF — a pin that spans a line break must
+  // never depend on which line ending git handed it (this exact pin turned CI
+  // red on 2026-08-07 while both local gate legs, reading an LF working tree,
+  // stayed green).
+  assert.match(retro, /`step-started`, `disposition`, `closed`, and\s+`correction`/);
   // A correction is an append-only reversal, never a rewrite.
   assert.match(retro, /never rewrites history/);
   assert.match(retro, /supersedes/);
