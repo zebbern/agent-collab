@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The retrospective gained a portfolio scope: `ledger --all` pools every goal's events (each entry keeps its slug), and retro.md now runs at two scopes with distinct jobs and floors — per-goal is the process retro at close, portfolio is the policy retro whose 5-disposition floor counts machine-wide, with findings grouped by goal and the per-machine caveat mandatory. Explicit method-invention mandate: portfolio proposals may revise procedures (brief shapes, delegation patterns, retro.md's own analysis steps), not just parameters, each finding cited from disposition notes or merged PR bodies — the same policy-artifacts-only, never-auto-applied rails.
+
 - Hardening pass on four items accepted as debt in the 0.2.0 review: (1)
   `ledger.mjs` now builds the sibling plugins' private-dir doctrine
   goal-locally — 0o700 root created recursively, the per-project leaf created
