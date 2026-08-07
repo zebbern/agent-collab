@@ -58,16 +58,21 @@
       "id": "goal-close-ledger-event",
       "title": "Record close events, and make ledger corrections auditable",
       "detail": "Two gaps, same file and vocabulary. (1) close --done/--abandoned changes goal status but writes no ledger line, so goal-level outcomes exist only in git and /goal:retro cannot see when or how goals ended. (2) Found by dogfooding 2026-08-07: two dispositions were recorded with a WRONG --delegate value (claimed codex/cursor for work Claude subagents actually did). The goal file was hand-corrected via the documented edit+set path, but the ledger is append-only with no correction mechanism, so the wrong values remain and /goal:retro would read them as fact — poisoning the exact attribution the retro exists to compute. Fix: append a closed event in handleClose (final status), and have set diff terminal dispositions against the on-disk goal and append a correction event naming the item, field, old and new value, for each change — preserving append-only semantics the way an accounting reversal does rather than rewriting history. Update retro.md so a later correction supersedes the earlier disposition record and the goal file is the tiebreaker. Event vocabulary becomes four: step-started, disposition, closed, correction. Extend the ledger tests.",
-      "status": "in-progress",
-      "disposition": null,
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-07T12:58:08.347Z",
+        "pr": 22,
+        "delegate": "none",
+        "notes": "Correction event added because a real mislabeled disposition was found in use during this goal"
+      },
       "startedAt": "2026-08-07T12:36:23.012Z"
     }
   ],
   "budget": {
     "perStepDelegations": 2
   },
-  "status": "active",
+  "status": "done",
   "blockedReason": null,
   "createdAt": "2026-08-07T11:22:39.650Z",
-  "updatedAt": "2026-08-07T12:36:23.013Z"
+  "updatedAt": "2026-08-07T13:08:48.776Z"
 }
