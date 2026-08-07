@@ -344,6 +344,36 @@ function removeFileIfExists(filePath) {
   }
 }
 
+const ATOMIC_RENAME_RETRIES = 10;
+const ATOMIC_RENAME_RETRY_MS = 15;
+
+// On Windows, a rename onto a target that another process is concurrently
+// replacing (or that AV/indexing briefly holds) fails with EPERM/EACCES/
+// EBUSY — the same transient set acquireStateLock already tolerates. Two
+// writers on the warned unlocked path used to crash here on the first
+// collision (observed live 2026-08-07). The tmp file is unique to this
+// writer, so a bounded retry is safe; exhaustion still fails loudly.
+// Scope: this covers the atomic JSON writes (state.json, job files) — the
+// metrics rotation rename has its own non-crashing catch. On the unlocked
+// path a retried payload can overwrite a writer that landed inside the
+// retry window; that race predates the retry (any unlocked writer can be
+// overtaken), which is why the path is warned and the merge guard still
+// caps the damage — the retry widens the window by at most ~240ms.
+function renameWithContentionRetry(temporaryFile, filePath) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(temporaryFile, filePath);
+      return;
+    } catch (error) {
+      const code = /** @type {NodeJS.ErrnoException} */ (error)?.code;
+      if ((code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") || attempt >= ATOMIC_RENAME_RETRIES) {
+        throw error;
+      }
+      sleepSync(ATOMIC_RENAME_RETRY_MS + Math.floor(Math.random() * 10));
+    }
+  }
+}
+
 function writeJsonFileAtomic(filePath, payload) {
   const temporaryFile = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -352,10 +382,16 @@ function writeJsonFileAtomic(filePath, payload) {
       flag: "wx",
       mode: 0o600
     });
-    fs.renameSync(temporaryFile, filePath);
+    renameWithContentionRetry(temporaryFile, filePath);
   } finally {
-    if (fs.existsSync(temporaryFile)) {
-      fs.unlinkSync(temporaryFile);
+    // Best-effort reap: a cleanup failure must never mask the original
+    // rename/write error — the tmp name is unique, so residue is inert.
+    try {
+      if (fs.existsSync(temporaryFile)) {
+        fs.unlinkSync(temporaryFile);
+      }
+    } catch {
+      // Deliberately swallowed.
     }
   }
 }
