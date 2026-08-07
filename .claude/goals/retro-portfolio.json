@@ -19,16 +19,21 @@
       "id": "portfolio-scope",
       "title": "ledger --all + two-scope retro.md with a method-invention mandate",
       "detail": "(1) goal-companion ledger gains --all: aggregate entries across every goal in the project (each entry already carries its slug; render with a [slug] prefix), refuse --all with a slug positional, refuse when no goals exist. (2) retro.md becomes two-scope: per-goal (process retro at close; floor 5 dispositions within the goal; below the global bar proposes goal-local hygiene only) and portfolio (ledger --all; policy retro; floor 5 dispositions machine-wide; the report MUST group findings by goal to expose task-type heterogeneity and MUST state the per-machine-per-project caveat). (3) Method-invention mandate, explicit: portfolio proposals may revise procedures encoded in policy artifacts — brief shapes, delegation patterns, choreography steps, retro.md itself — not only parameters; evidence comes from disposition notes and merged PR bodies, cited per finding. The policy-artifacts-only and never-auto-applied rails are unchanged. (4) Pins updated/extended in goal-docs.test.mjs; ledger --all tests in goal-companion.test.mjs.",
-      "status": "in-progress",
-      "disposition": null,
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-07T15:23:25.492Z",
+        "pr": 32,
+        "delegate": "none",
+        "notes": "Direct implementation; two-scope split motivated by three live floor refusals at 1/4/2 dispositions against 7 machine-wide"
+      },
       "startedAt": "2026-08-07T15:17:00.305Z"
     }
   ],
   "budget": {
     "perStepDelegations": 2
   },
-  "status": "active",
+  "status": "done",
   "blockedReason": null,
   "createdAt": "2026-08-07T15:16:52.614Z",
-  "updatedAt": "2026-08-07T15:17:00.306Z"
+  "updatedAt": "2026-08-07T15:23:33.093Z"
 }

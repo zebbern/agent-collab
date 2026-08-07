@@ -5,6 +5,10 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## 1.0.6+fork.6
+
+- The codex-delegation skill gained a Brief shape section from the first portfolio retrospective (PR #33): prefer design-to-verdict briefs for analysis delegations and refine by narrowing on a dead run — cited from ledger evidence (0/2 open-ended xhigh briefs survived; 2/2 narrowed retries merged).
+
 ## 1.0.6+fork.5
 
 - `/codex:doctor` gained `model-roster-pins`: a check meant to warn when a pinned `--profile` model id no longer exists in the provider's live model roster. Live-verified 2026-08-07 that codex-cli 0.146.0 exposes no model-roster surface at all (its subcommands are exec/review/login/logout/mcp/plugin/mcp-server/app-server/remote-control/app/completion/update/doctor/sandbox/debug/apply/resume — no `models`/`list`), so for codex this always renders an honest `ok` stating the pinned ids (`deep`, `fast`) are unverifiable because no roster command exists to check them against — never a warning that would cry wolf on every healthy install, and never wording that implies the ids were confirmed. The check builder itself (`buildModelRosterCheck`, shared chassis) is provider-free and takes the profile table and a roster-probe function, so cursor's copy (see the cursor changelog) gets real verification against `cursor-agent --list-models` for free.

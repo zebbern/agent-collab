@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- The goal-runner skill gained a start-before-working rail from the first portfolio retrospective (PR #33): call start before any work on an increment begins, or the duration is untrustworthy and the retro discards it.
 - The retrospective gained a portfolio scope: `ledger --all` pools every goal's events (each entry keeps its slug), and retro.md now runs at two scopes with distinct jobs and floors — per-goal is the process retro at close, portfolio is the policy retro whose 5-disposition floor counts machine-wide, with findings grouped by goal and the per-machine caveat mandatory. Explicit method-invention mandate: portfolio proposals may revise procedures (brief shapes, delegation patterns, retro.md's own analysis steps), not just parameters, each finding cited from disposition notes or merged PR bodies — the same policy-artifacts-only, never-auto-applied rails.
 
 - Hardening pass on four items accepted as debt in the 0.2.0 review: (1)

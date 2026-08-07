@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
+- The cursor-delegation skill gained an evidence-gap note from the first portfolio retrospective (PR #33): Cursor had zero delegate dispositions across the first 8 ledger entries, so fitting increments should be routed its way to build the comparison the routing policy needs.
 - The doctor roster probe now builds its command line through cursor.mjs's exported plan builder instead of replaying the construction by hand — a plan-shape change can no longer silently strand it. The cmd-shim refusal remains (runCommand cannot carry windowsVerbatimArguments to spawnSync).
 
 ## 0.5.0
