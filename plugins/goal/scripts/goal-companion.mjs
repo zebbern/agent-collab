@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 
 import { parseCommandInput, resolveCommandCwd } from "./lib/args.mjs";
 import { resolveGoal, saveGoal, validateGoal } from "./lib/goal-state.mjs";
@@ -127,6 +128,199 @@ async function handleNext(argv) {
   output({ slug, item }, `Next increment: ${item.id} — ${item.title}\n`, options.json);
 }
 
+const DISPOSITIONS = ["merged", "discarded", "dropped", "blocked"];
+const DELEGATES = ["codex", "cursor", "none"];
+const DEFAULT_CRITERION_TIMEOUT_MS = 600000;
+
+function requireItem(goal, itemId) {
+  const item = goal.backlog.find((candidate) => candidate.id === itemId);
+  if (!item) {
+    throw new Error(
+      `Item "${itemId}" not found. Backlog: ${goal.backlog.map((candidate) => candidate.id).join(", ")}`
+    );
+  }
+  return item;
+}
+
+async function handleStart(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const [slugArg, itemId] = positionals;
+  if (!slugArg || !itemId) {
+    throw new Error("start requires <slug> <itemId>");
+  }
+  const { slug, goal } = resolveGoal(cwd, slugArg);
+  if (goal.status !== "active") {
+    throw new Error(`Goal "${slug}" is ${goal.status}; only an active goal can start work.`);
+  }
+  const inProgress = goal.backlog.find((item) => item.status === "in-progress");
+  if (inProgress) {
+    throw new Error(
+      `Item "${inProgress.id}" is already in progress. One increment at a time — record it first.`
+    );
+  }
+  const item = requireItem(goal, itemId);
+  if (item.status !== "todo") {
+    throw new Error(`Item "${itemId}" is ${item.status}, not todo; it cannot be started.`);
+  }
+  item.status = "in-progress";
+  item.startedAt = new Date().toISOString();
+  saveGoal(cwd, goal);
+  appendLedger(cwd, { slug, itemId, event: "step-started" });
+  output({ slug, item }, `Started ${itemId}: ${item.title}\n`, options.json);
+}
+
+async function handleRecord(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "disposition", "pr", "delegate", "notes"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const [slugArg, itemId, ...extra] = positionals;
+  if (!slugArg || !itemId) {
+    throw new Error("record requires <slug> <itemId>");
+  }
+  // Handle shell splitting of multi-word option values on Windows
+  if (extra.length > 0 && options.notes) {
+    options.notes = [options.notes, ...extra].join(" ");
+  }
+  const disposition = options.disposition;
+  if (!DISPOSITIONS.includes(disposition)) {
+    throw new Error(`--disposition must be one of ${DISPOSITIONS.join("|")}`);
+  }
+  if (options.delegate !== undefined && !DELEGATES.includes(options.delegate)) {
+    throw new Error(`--delegate must be one of ${DELEGATES.join("|")}`);
+  }
+  let pr;
+  if (options.pr !== undefined) {
+    pr = Number(options.pr);
+    if (!Number.isInteger(pr) || pr <= 0) {
+      throw new Error("--pr must be a positive integer");
+    }
+  }
+  const { slug, goal } = resolveGoal(cwd, slugArg);
+  const item = requireItem(goal, itemId);
+  if (disposition === "dropped") {
+    if (item.status !== "todo" && item.status !== "in-progress") {
+      throw new Error(`Item "${itemId}" is ${item.status}; only todo or in-progress items can be dropped.`);
+    }
+  } else if (item.status !== "in-progress") {
+    throw new Error(`Item "${itemId}" is ${item.status}; it must be in-progress to record "${disposition}".`);
+  }
+  item.status = disposition;
+  item.disposition = {
+    recordedAt: new Date().toISOString(),
+    ...(pr !== undefined ? { pr } : {}),
+    ...(options.delegate !== undefined ? { delegate: options.delegate } : {}),
+    ...(options.notes !== undefined ? { notes: options.notes } : {})
+  };
+  if (disposition === "blocked") {
+    goal.status = "blocked";
+    goal.blockedReason = options.notes || `Item "${itemId}" is blocked.`;
+  }
+  saveGoal(cwd, goal);
+  appendLedger(cwd, {
+    slug,
+    itemId,
+    event: "disposition",
+    disposition,
+    ...(pr !== undefined ? { pr } : {}),
+    ...(options.delegate !== undefined ? { delegate: options.delegate } : {}),
+    ...(options.notes !== undefined ? { notes: options.notes } : {})
+  });
+  output(
+    { slug, item, goalStatus: goal.status },
+    `Recorded ${itemId} as ${disposition}.${goal.status === "blocked" ? " Goal is now blocked." : ""}\n`,
+    options.json
+  );
+}
+
+function runCheck(cwd, goal) {
+  const results = goal.acceptanceCriteria.map((criterion) => {
+    if (criterion.kind === "manual") {
+      return { kind: "manual", label: criterion.text, outcome: "manual" };
+    }
+    // Command criteria run via the shell: the goal file is git-tracked project
+    // content, the same trust level as npm scripts (documented in the docs).
+    const outcome = spawnSync(criterion.run, {
+      cwd,
+      shell: true,
+      encoding: "utf8",
+      timeout: criterion.timeoutMs ?? DEFAULT_CRITERION_TIMEOUT_MS
+    });
+    const pass = outcome.error === undefined && outcome.status === 0;
+    return {
+      kind: "command",
+      label: criterion.run,
+      outcome: pass ? "pass" : "fail",
+      exitCode: outcome.status ?? null,
+      ...(outcome.error ? { detail: outcome.error.message } : {})
+    };
+  });
+  const passed = results.every((result) => result.outcome !== "fail");
+  return { results, passed };
+}
+
+async function handleCheck(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const { slug, goal } = resolveGoal(cwd, positionals[0] ?? "");
+  const { results, passed } = runCheck(cwd, goal);
+  const rendered = results
+    .map((result) =>
+      result.outcome === "manual"
+        ? `- [manual] ${result.label}`
+        : `- [${result.outcome}] ${result.label} (exit ${result.exitCode ?? "n/a"})`
+    )
+    .join("\n");
+  output({ slug, results, passed }, `${rendered}\n${passed ? "All command criteria pass." : "Command criteria FAILED."}\n`, options.json);
+  if (!passed) {
+    process.exitCode = 1;
+  }
+}
+
+async function handleClose(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json", "done", "abandoned"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const slugArg = positionals[0];
+  if (!slugArg) {
+    throw new Error("close requires <slug>");
+  }
+  if (options.done === options.abandoned) {
+    throw new Error("close requires exactly one of --done or --abandoned");
+  }
+  const { slug, goal } = resolveGoal(cwd, slugArg);
+  if (options.done) {
+    const open = goal.backlog.filter(
+      (item) => item.status === "todo" || item.status === "in-progress"
+    );
+    if (open.length > 0) {
+      throw new Error(
+        `Cannot close as done: ${open.length} item(s) still todo/in-progress (${open.map((item) => item.id).join(", ")}).`
+      );
+    }
+    const { passed } = runCheck(cwd, goal);
+    if (!passed) {
+      throw new Error("Cannot close as done: command acceptance criteria are failing (run `check`).");
+    }
+    goal.status = "done";
+  } else {
+    goal.status = "abandoned";
+  }
+  goal.blockedReason = null;
+  saveGoal(cwd, goal);
+  output({ slug, status: goal.status }, `Goal "${slug}" closed as ${goal.status}.\n`, options.json);
+}
+
 async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
@@ -142,6 +336,18 @@ async function main() {
       return;
     case "next":
       await handleNext(argv);
+      return;
+    case "start":
+      await handleStart(argv);
+      return;
+    case "record":
+      await handleRecord(argv);
+      return;
+    case "check":
+      await handleCheck(argv);
+      return;
+    case "close":
+      await handleClose(argv);
       return;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);

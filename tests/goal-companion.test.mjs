@@ -204,3 +204,111 @@ test("help prints usage and unknown subcommands refuse", () => {
   assert.equal(unknown.status, 1);
   assert.match(unknown.stderr, /Unknown subcommand: frobnicate/);
 });
+
+test("start enforces one in-progress item and records step-started", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+
+  const start = companion(["start", "test-goal", "first-item", "--json"], project);
+  assert.equal(start.status, 0, start.stderr);
+  assert.equal(JSON.parse(start.stdout).item.status, "in-progress");
+
+  const second = companion(["start", "test-goal", "second-item"], project);
+  assert.equal(second.status, 1);
+  assert.match(second.stderr, /first-item.*already in progress/s);
+
+  const { entries } = readLedger(project);
+  assert.equal(entries.at(-1).event, "step-started");
+  assert.equal(entries.at(-1).itemId, "first-item");
+});
+
+test("record enforces the state machine and blocked halts the goal", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+
+  // todo -> merged is illegal; only dropped may skip in-progress.
+  const illegal = companion(
+    ["record", "test-goal", "first-item", "--disposition", "merged"],
+    project
+  );
+  assert.equal(illegal.status, 1);
+  assert.match(illegal.stderr, /must be in-progress/);
+
+  const dropped = companion(
+    ["record", "test-goal", "second-item", "--disposition", "dropped", "--notes", "obsolete"],
+    project
+  );
+  assert.equal(dropped.status, 0, dropped.stderr);
+
+  companion(["start", "test-goal", "first-item"], project);
+  const blocked = companion(
+    ["record", "test-goal", "first-item", "--disposition", "blocked", "--notes", "needs credentials"],
+    project
+  );
+  assert.equal(blocked.status, 0, blocked.stderr);
+  assert.equal(JSON.parse(companion(["status", "--json"], project).stdout).status, "blocked");
+
+  const refused = companion(["next"], project);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /blocked.*needs credentials/s);
+});
+
+test("record merged stores the disposition with pr and delegate", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  companion(["start", "test-goal", "first-item"], project);
+  const record = companion(
+    [
+      "record", "test-goal", "first-item",
+      "--disposition", "merged", "--pr", "12", "--delegate", "codex", "--notes", "landed"
+    ],
+    project
+  );
+  assert.equal(record.status, 0, record.stderr);
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(project, ".claude", "goals", "test-goal.json"), "utf8")
+  );
+  const item = stored.backlog.find((candidate) => candidate.id === "first-item");
+  assert.equal(item.status, "merged");
+  assert.equal(item.disposition.pr, 12);
+  assert.equal(item.disposition.delegate, "codex");
+  assert.ok(item.disposition.recordedAt);
+
+  const { entries } = readLedger(project);
+  const last = entries.at(-1);
+  assert.equal(last.event, "disposition");
+  assert.equal(last.disposition, "merged");
+  assert.equal(last.pr, 12);
+});
+
+test("check judges command criteria by exit code and lists manual ones", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  const pass = companion(["check", "--json"], project);
+  assert.equal(pass.status, 0, pass.stderr);
+  const passPayload = JSON.parse(pass.stdout);
+  assert.equal(passPayload.passed, true);
+  assert.equal(passPayload.results.find((r) => r.kind === "manual").outcome, "manual");
+
+  const failing = makeTempDir("goal-proj-");
+  writeGoalFixture(failing, {
+    acceptanceCriteria: [{ kind: "command", run: "node -e \"process.exit(3)\"", expect: "exit0" }]
+  });
+  const fail = companion(["check", "--json"], failing);
+  assert.equal(fail.status, 1);
+  assert.equal(JSON.parse(fail.stdout).passed, false);
+});
+
+test("close --done refuses while work remains, succeeds when the backlog is settled", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  const early = companion(["close", "test-goal", "--done"], project);
+  assert.equal(early.status, 1);
+  assert.match(early.stderr, /todo/);
+
+  companion(["record", "test-goal", "first-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  companion(["record", "test-goal", "second-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  const done = companion(["close", "test-goal", "--done", "--json"], project);
+  assert.equal(done.status, 0, done.stderr);
+  assert.equal(JSON.parse(done.stdout).status, "done");
+});
