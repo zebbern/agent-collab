@@ -423,6 +423,7 @@ test("close --done refuses a hand-edited active goal that still carries a blocke
       { id: "ok-item", title: "ok", status: "dropped", disposition: { recordedAt: "2026-08-07T00:00:00.000Z" } }
     ]
   });
+  // The refusal now fires at load (validateGoal's active/blocked invariant); handleClose's own guard is the belt-and-suspenders layer behind it.
   const done = companion(["close", "test-goal", "--done"], project);
   assert.equal(done.status, 1);
   assert.match(done.stderr, /stuck-item/);

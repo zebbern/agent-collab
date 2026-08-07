@@ -46,6 +46,14 @@ test("goal step command pins the one-increment choreography", () => {
   assert.match(step, /Do not start another increment/);
 });
 
+test("goal commands pin their frontmatter: user-surface only, node-only bash", () => {
+  for (const command of ["set", "step", "status", "help"]) {
+    const source = read(path.join("commands", `${command}.md`));
+    assert.match(source, /^disable-model-invocation: true$/m, `${command}.md`);
+    assert.match(source, /^allowed-tools: Bash\(node:\*\)$/m, `${command}.md`);
+  }
+});
+
 test("goal-runner skill pins the policy", () => {
   const skill = read(path.join("skills", "goal-runner", "SKILL.md"));
   assert.match(skill, /^name: goal-runner$/m);
