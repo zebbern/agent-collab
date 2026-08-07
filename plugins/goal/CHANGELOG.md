@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Ledger corrections: dogfooding this plugin surfaced two dispositions
   recorded with a wrong `--delegate` value (claiming codex/cursor for work

@@ -17,7 +17,7 @@ function read(relative) {
 test("goal plugin manifest and marketplace entry agree", () => {
   const plugin = JSON.parse(read(path.join(".claude-plugin", "plugin.json")));
   assert.equal(plugin.name, "goal");
-  assert.equal(plugin.version, "0.1.0");
+  assert.equal(plugin.version, "0.2.0");
   assert.match(plugin.description, /long-horizon/i);
 
   const marketplace = JSON.parse(
@@ -25,7 +25,7 @@ test("goal plugin manifest and marketplace entry agree", () => {
   );
   const entry = marketplace.plugins.find((candidate) => candidate.name === "goal");
   assert.ok(entry, "marketplace.json has no goal entry");
-  assert.equal(entry.version, "0.1.0");
+  assert.equal(entry.version, "0.2.0");
   assert.equal(entry.source, "./plugins/goal");
 });
 
