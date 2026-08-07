@@ -23,6 +23,10 @@ Policy:
   with the failure evidence and re-delegate once; then record `blocked`.
 - **Blocked is a full stop.** A blocked item blocks the goal; `next` refuses
   until a human resolves it. Surface the reason; never guess past it.
+- **Unattended never merges.** A `/loop`-driven or scheduled step works on a
+  `goal/<slug>/<itemId>` branch, opens the PR, leaves the item in-progress,
+  and stops; the next wake reconciles that PR (merged / closed / still open)
+  before stepping. Merging stays human.
 - **Honest dispositions.** `merged` means the PR merged. Never invent progress,
   never record a disposition that has not actually happened, and if the
   companion or a delegate fails, report that instead of substituting your own

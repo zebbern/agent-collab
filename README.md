@@ -278,13 +278,16 @@ change as a PR through your normal gates, and records what actually happened
 — merged, discarded, or blocked — in the goal file and an append-only ledger.
 The companion enforces the honest parts mechanically: one in-progress item at
 a time, refusals with specifics instead of silent repair, and a blocked goal
-is a full stop until a human resolves it.
+is a full stop until a human resolves it. `/goal:step` also runs unattended
+(via `/loop` or a scheduled agent): it never merges a PR itself, and the next
+wake reconciles that PR before starting another increment.
 
 ```bash
 /plugin install goal@agent-collab
 /goal:set    # interview → validated goal file
 /goal:step   # advance exactly one increment
 /goal:status
+/goal:retro  # analyze the ledger, propose policy changes as a PR
 ```
 
 ## How it works

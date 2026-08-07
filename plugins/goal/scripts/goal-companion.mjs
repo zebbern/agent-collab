@@ -19,6 +19,7 @@ function printUsage() {
       "  node scripts/goal-companion.mjs start <slug> <itemId> [--json]",
       "  node scripts/goal-companion.mjs record <slug> <itemId> --disposition <merged|discarded|dropped|blocked> [--pr <n>] [--delegate <codex|cursor|none>] [--notes <text>] [--json]",
       "  node scripts/goal-companion.mjs check [slug] [--json]",
+      "  node scripts/goal-companion.mjs ledger [slug] [--json]",
       "  node scripts/goal-companion.mjs close <slug> (--done|--abandoned) [--json]",
       "  node scripts/goal-companion.mjs help",
       "",
@@ -290,6 +291,31 @@ async function handleCheck(argv) {
   }
 }
 
+async function handleLedger(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  // Read-only: works on goals of any status (the retrospective reads history,
+  // it never advances work), so no active-goal gate here.
+  const { slug } = resolveGoal(cwd, positionals[0] ?? "");
+  const { entries, corruptCount } = readLedger(cwd);
+  const goalEntries = entries.filter((entry) => entry.slug === slug);
+  const lines = [
+    ...goalEntries.map(
+      (entry) =>
+        `${entry.at} ${entry.event}${entry.disposition ? ` ${entry.disposition}` : ""} ${entry.itemId}${entry.pr ? ` PR#${entry.pr}` : ""}${entry.delegate ? ` via ${entry.delegate}` : ""}`
+    ),
+    corruptCount > 0 ? `Ledger: ${corruptCount} corrupt line(s) skipped.` : null
+  ].filter((line) => line !== null);
+  output(
+    { slug, entries: goalEntries, corruptLedgerLines: corruptCount },
+    `${lines.join("\n")}\n`,
+    options.json
+  );
+}
+
 async function handleClose(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -367,6 +393,9 @@ async function main() {
       return;
     case "check":
       await handleCheck(argv);
+      return;
+    case "ledger":
+      await handleLedger(argv);
       return;
     case "close":
       await handleClose(argv);

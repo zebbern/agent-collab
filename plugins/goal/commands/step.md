@@ -26,3 +26,25 @@ call (or `/loop` while they watch).
 7. Record the real disposition (`merged` with `--pr <n>` and `--delegate`,
    or `discarded`/`blocked` with `--notes`), show the one-line output of
    `status`, and stop.
+
+## Unattended (scheduled) operation
+
+The same one-increment choreography can be driven without a human watching —
+by `/loop` or a Claude Code scheduled agent. Only the trigger changes; the
+architecture does not. Extra rails for that mode:
+
+- **Branch naming.** Do the increment's work on a branch named
+  `goal/<slug>/<itemId>`, so a later wake can find its PR mechanically.
+- **An unattended step never merges PRs.** It opens the PR, leaves the item
+  in-progress, and stops. Merging stays human.
+- **Reconcile before stepping.** On wake, if an item is in-progress, find its
+  PR by head branch (`gh pr list --head goal/<slug>/<itemId>`) before doing
+  anything else:
+  - merged → `record <slug> <itemId> --disposition merged --pr <n>`
+  - closed unmerged → `record <slug> <itemId> --disposition discarded --notes "<why>"`
+  - still open → stop and wait; do not start another increment.
+- **Blocked halts the loop.** A blocked goal stops every subsequent wake
+  until a human resolves it — exactly as in attended mode.
+- **Budget stays advisory**, but every delegation is still announced into
+  the session log, so the wake's transcript carries the same disclosure a
+  watching user would have seen.

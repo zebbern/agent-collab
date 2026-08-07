@@ -63,6 +63,28 @@ test("goal-runner skill pins the policy", () => {
   assert.match(skill, /Never invent progress/);
 });
 
+test("goal step command pins the unattended operation recipe", () => {
+  const step = read(path.join("commands", "step.md"));
+  assert.match(step, /## Unattended \(scheduled\) operation/);
+  assert.match(step, /never merges PRs/);
+  assert.match(step, /goal\/<slug>\/<itemId>/);
+  assert.match(step, /Reconcile before stepping/i);
+});
+
+test("goal retro command pins its frontmatter and hard rules", () => {
+  const retro = read(path.join("commands", "retro.md"));
+  assert.match(retro, /^description: Analyze the goal ledger and propose policy improvements$/m);
+  assert.match(retro, /^argument-hint: "\[slug\]"$/m);
+  assert.match(retro, /^disable-model-invocation: true$/m);
+  assert.match(retro, /^allowed-tools: Bash\(node:\*\)$/m);
+  assert.match(retro, /goal-companion\.mjs" ledger/);
+  assert.match(retro, /goal-companion\.mjs" status/);
+  assert.match(retro, /never auto-applied/);
+  assert.match(retro, /too thin for conclusions/);
+  assert.match(retro, /[Pp]olicy artifacts only/);
+  assert.match(retro, /skill wording, routing guidance, effort tiers, budgets/);
+});
+
 test("README documents the goal plugin", () => {
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   assert.match(readme, /## Goal plugin/);
