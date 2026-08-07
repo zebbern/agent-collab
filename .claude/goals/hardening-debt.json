@@ -19,8 +19,9 @@
       "id": "goal-input-hardening",
       "title": "Goal plugin: build the documented-not-built hardening (private state dir, strict flags, timestamp types, honest timeout suffix)",
       "detail": "Four accepted-debt items from the goal plugin's final review, one coherent hardening pass. (1) ledger.mjs stateDir was 'documented, not built': mirror the sibling plugins' private-dir doctrine goal-locally (recursive-create the root then validate it, non-recursive mkdir at the leaf so a pre-planted symlink fails EEXIST instead of being followed, lstat symlink refusal, 0o700 with POSIX mode/ownership checks gated off win32) — unattended runs are now documented, so free-text notes in a world-readable tmpdir deserve the sibling treatment; update the ledger.mjs comment and the spec line that called this the known upgrade. (2) args.mjs silently passes unknown short flags (-x) to positionals; refuse any token starting with '-' that is not a known option, keeping -C working. (3) validateGoal allows createdAt/updatedAt of any type; when present they must be date-parseable strings, errors naming the field. (4) handleCheck appends 'its processes may still be running' to ANY spawn error detail; scope it to timeout errors (ETIMEDOUT/timed out), since an EACCES never left processes behind. Tests for each behavior in the goal suites.",
-      "status": "todo",
-      "disposition": null
+      "status": "in-progress",
+      "disposition": null,
+      "startedAt": "2026-08-07T14:33:17.809Z"
     },
     {
       "id": "cursor-roster-probe-dedup",
@@ -36,5 +37,5 @@
   "status": "active",
   "blockedReason": null,
   "createdAt": "2026-08-07T14:33:09.094Z",
-  "updatedAt": "2026-08-07T14:33:09.095Z"
+  "updatedAt": "2026-08-07T14:33:17.810Z"
 }

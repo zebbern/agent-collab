@@ -133,9 +133,11 @@ This file is the raw feed for the future retrospective loop. Corrupt lines
 are skipped and *counted*; `status` reports the count — never silently
 absorbed.
 
-v1 creates the state dir with default permissions; adopting the siblings'
-private-dir hardening is the known upgrade if ledger content ever becomes
-sensitive.
+v1 shipped the state dir with default permissions; the siblings' private-dir
+hardening (0o700 root + non-recursive leaf creation, symlink/non-directory
+refusal, off-win32 ownership and loose-mode checks) was built goal-locally in
+`plugins/goal/scripts/lib/ledger.mjs` on 2026-08-07 — no longer a known
+upgrade, it is in place.
 
 ## Companion command surface
 
