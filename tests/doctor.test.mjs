@@ -23,6 +23,10 @@ import {
 } from "../plugins/codex/scripts/lib/doctor.mjs";
 import { listJobs, resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
+// Keep every state write inside a temp canonical root — never the real
+// per-user ~/.claude/codex-companion.
+process.env.CODEX_COMPANION_STATE_ROOT = makeTempDir("codex-plugin-doctor-root-");
+
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
 
 test("runDoctorChecks aggregates the worst status and keeps going past a throwing check", async () => {
@@ -100,6 +104,40 @@ test("state hygiene checks surface cleanup-pending jobs, dead workers, stale loc
   assert.equal(byId.get("jobs-orphaned-files").status, "warning");
   assert.match(byId.get("jobs-orphaned-files").details.join(" "), /task-orphan/);
   assert.equal(report.overallStatus, "warning");
+});
+
+test("state-root residue from pre-canonical roots is surfaced, with active jobs called out", async () => {
+  const report = await runDoctorChecks(
+    buildStateHygieneChecks({
+      stateDir: makeTempDir(),
+      jobs: [],
+      getLiveJobPidsImpl: () => new Set(),
+      commandPrefix: "/codex",
+      legacyShards: [{ dir: "C:/legacy/state/repo-abc123", jobs: { total: 3, active: 1 }, pendingMetrics: true }]
+    })
+  );
+  const check = report.checks.find((entry) => entry.id === "state-root-residue");
+
+  assert.equal(check.status, "warning");
+  assert.match(check.message, /older plugin version/);
+  assert.match(check.message, /1 active/);
+  assert.match(check.details.join(" "), /repo-abc123/);
+});
+
+test("an empty legacy shard list reads as a healthy canonical root", async () => {
+  const report = await runDoctorChecks(
+    buildStateHygieneChecks({
+      stateDir: makeTempDir(),
+      jobs: [],
+      getLiveJobPidsImpl: () => new Set(),
+      commandPrefix: "/codex",
+      legacyShards: []
+    })
+  );
+  const check = report.checks.find((entry) => entry.id === "state-root-residue");
+
+  assert.equal(check.status, "ok");
+  assert.match(check.message, /canonical state root/);
 });
 
 test("an unavailable process table reads as unknown liveness, never as healthy", async () => {

@@ -23,7 +23,7 @@ export const DETACHED_FIXTURE_TTL_MS = 5 * 60 * 1000;
 export const SELF_EXPIRING_KEEPALIVE = selfExpiringKeepaliveCode();
 const runtimeTempDirs = new Set();
 export const runtimePluginDataDir = createTempDir("codex-plugin-runtime-state-");
-process.env.CLAUDE_PLUGIN_DATA = runtimePluginDataDir;
+process.env.CODEX_COMPANION_STATE_ROOT = runtimePluginDataDir;
 let brokerOwnerSequence = 0;
 
 export function makeTempDir(prefix) {

@@ -16,8 +16,25 @@ import {
   registerBrokerOwner as registerBrokerOwnerImpl,
   releaseBrokerChild as releaseBrokerChildImpl,
   releaseBrokerOwner as releaseBrokerOwnerImpl,
-  releaseBrokerRegistryLock
+  releaseBrokerRegistryLock,
+  resolveBrokerOwnershipRoot
 } from "../plugins/codex/scripts/lib/broker-ownership.mjs";
+
+test("resolveBrokerOwnershipRoot derives from the canonical state root, ignoring CLAUDE_PLUGIN_DATA", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-broker-root-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  assert.equal(
+    resolveBrokerOwnershipRoot({ CODEX_COMPANION_STATE_ROOT: root, CLAUDE_PLUGIN_DATA: path.join(root, "poison") }),
+    path.join(root, "broker-ownership-v1")
+  );
+  // Without the override the registry exists under the per-user canonical
+  // root — never disabled, never relocated by an ambient plugin-data dir.
+  assert.equal(
+    resolveBrokerOwnershipRoot({ CLAUDE_PLUGIN_DATA: path.join(root, "poison") }),
+    path.join(os.homedir(), ".claude", "codex-companion", "broker-ownership-v1")
+  );
+});
 
 const TEST_LOCK_PID = 4900;
 const TEST_LOCK_IDENTITY = "4900@Mon Jul 27 00:00:40 2026";
@@ -65,7 +82,7 @@ function releaseBrokerChild(registration, options = {}) {
 function makeFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-broker-ownership-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = { CLAUDE_PLUGIN_DATA: root };
+  const env = { CODEX_COMPANION_STATE_ROOT: root };
   const brokerIdentity = "4100@Mon Jul 27 00:00:00 2026";
   const ownershipSnapshot = {
     rootPid: 4100,
@@ -107,7 +124,7 @@ function ownerEnv(env, sessionId, pid, startedAt) {
 test("initial broker and owner records become visible atomically", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-broker-atomic-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = ownerEnv({ CLAUDE_PLUGIN_DATA: root }, "session-atomic", 5050, "Mon Jul 27 00:00:45 2026");
+  const env = ownerEnv({ CODEX_COMPANION_STATE_ROOT: root }, "session-atomic", 5050, "Mon Jul 27 00:00:45 2026");
   const brokerIdentity = "4100@Mon Jul 27 00:00:00 2026";
   const registration = publishRegisteredBroker({
     cwd: root,
@@ -146,7 +163,7 @@ test("initial publication can make its transaction lock visible atomically", (t)
       processGroupId: 4100,
       members: []
     },
-    env: ownerEnv({ CLAUDE_PLUGIN_DATA: root }, "session-atomic-lock", 5050, "Mon Jul 27 00:00:45 2026"),
+    env: ownerEnv({ CODEX_COMPANION_STATE_ROOT: root }, "session-atomic-lock", 5050, "Mon Jul 27 00:00:45 2026"),
     retainRegistryLock: true,
     hasLiveProcessIdentityImpl: () => true,
     getProcessIdentityImpl: (pid) => `${pid}@Mon Jul 27 00:00:41 2026`
@@ -172,11 +189,11 @@ test("missing owner identity prevents any broker registry publication", (t) => {
       processGroupId: 4100,
       members: []
     },
-    env: { CLAUDE_PLUGIN_DATA: root }
+    env: { CODEX_COMPANION_STATE_ROOT: root }
   });
 
   assert.deepEqual(registration, { registered: false, reason: "session-owner-unavailable" });
-  assert.equal(fs.existsSync(path.join(root, "state", "broker-ownership-v1")), false);
+  assert.equal(fs.existsSync(path.join(root, "broker-ownership-v1")), false);
 });
 
 test("stale owner identity prevents any broker registry publication", (t) => {
@@ -192,18 +209,18 @@ test("stale owner identity prevents any broker registry publication", (t) => {
       processGroupId: 4100,
       members: []
     },
-    env: ownerEnv({ CLAUDE_PLUGIN_DATA: root }, "session-stale", 5050, "Mon Jul 27 00:00:45 2026"),
+    env: ownerEnv({ CODEX_COMPANION_STATE_ROOT: root }, "session-stale", 5050, "Mon Jul 27 00:00:45 2026"),
     hasLiveProcessIdentityImpl: () => false
   });
 
   assert.deepEqual(registration, { registered: false, reason: "session-owner-not-live" });
-  assert.equal(fs.existsSync(path.join(root, "state", "broker-ownership-v1")), false);
+  assert.equal(fs.existsSync(path.join(root, "broker-ownership-v1")), false);
 });
 
 test("initial publication revalidates the sole owner after preparing registry bytes", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-broker-owner-revalidation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = ownerEnv({ CLAUDE_PLUGIN_DATA: root }, "session-race", 5050, "Mon Jul 27 00:00:45 2026");
+  const env = ownerEnv({ CODEX_COMPANION_STATE_ROOT: root }, "session-race", 5050, "Mon Jul 27 00:00:45 2026");
   let ownerChecks = 0;
   const registration = publishRegisteredBroker({
     cwd: root,
@@ -226,14 +243,14 @@ test("initial publication revalidates the sole owner after preparing registry by
   });
 
   assert.deepEqual(registration, { registered: false, reason: "session-owner-not-live" });
-  assert.equal(fs.existsSync(path.join(root, "state", "broker-ownership-v1")), true);
-  assert.deepEqual(fs.readdirSync(path.join(root, "state", "broker-ownership-v1")), []);
+  assert.equal(fs.existsSync(path.join(root, "broker-ownership-v1")), true);
+  assert.deepEqual(fs.readdirSync(path.join(root, "broker-ownership-v1")), []);
 });
 
 test("initial publication revalidates the broker identity immediately before visibility", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-broker-process-revalidation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = ownerEnv({ CLAUDE_PLUGIN_DATA: root }, "session-race", 5050, "Mon Jul 27 00:00:45 2026");
+  const env = ownerEnv({ CODEX_COMPANION_STATE_ROOT: root }, "session-race", 5050, "Mon Jul 27 00:00:45 2026");
   const registration = publishRegisteredBroker({
     cwd: root,
     endpoint: `unix:${path.join(root, "broker.sock")}`,
@@ -251,7 +268,7 @@ test("initial publication revalidates the broker identity immediately before vis
   });
 
   assert.deepEqual(registration, { registered: false, reason: "broker-not-live" });
-  assert.deepEqual(fs.readdirSync(path.join(root, "state", "broker-ownership-v1")), []);
+  assert.deepEqual(fs.readdirSync(path.join(root, "broker-ownership-v1")), []);
 });
 
 test("owner publication revalidates the exact owner while holding the registry lock", (t) => {

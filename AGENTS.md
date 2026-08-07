@@ -72,8 +72,15 @@ npm run build                           # regenerates app-server types + tsc che
   that cannot hold on Windows use the sibling skip style
   (`t.skip("Unix ... are required for this contract.")`) — never delete or
   weaken a guard to make a platform pass.
-- The two plugins' state dirs stay separate (`codex-companion` vs
-  `cursor-companion` under temp/plugin-data).
+- The two plugins' state dirs stay separate: ONE canonical per-user root each
+  (`~/.claude/codex-companion` vs `~/.claude/cursor-companion`; goal uses
+  `~/.claude/goal-companion`). Ambient `CLAUDE_PLUGIN_DATA` is NEVER consulted
+  for root selection — it names whichever install's hook exported it last and
+  split state across invocation contexts (fixed 2026-08-07); it survives only
+  as a legacy migration source. Tests isolate via
+  `CODEX_COMPANION_STATE_ROOT`/`CURSOR_COMPANION_STATE_ROOT`/
+  `GOAL_COMPANION_STATE_ROOT` pointed at temp dirs — a state-touching test
+  file without the override writes to the real per-user root.
 
 ## Platform facts (learned the hard way — do not rediscover)
 

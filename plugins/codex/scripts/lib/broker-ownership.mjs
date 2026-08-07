@@ -4,12 +4,12 @@ import path from "node:path";
 import process from "node:process";
 
 import { getLiveProcessPids, getProcessIdentity, hasLiveProcessIdentity } from "./process.mjs";
+import { resolveStateRoot } from "./state.mjs";
 
 export const BROKER_OWNERSHIP_VERSION = 1;
 export const SESSION_OWNER_PID_ENV = "CODEX_COMPANION_SESSION_OWNER_PID";
 export const SESSION_OWNER_IDENTITY_ENV = "CODEX_COMPANION_SESSION_OWNER_IDENTITY";
 
-const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 const REGISTRY_DIR_NAME = "broker-ownership-v1";
 const REGISTRY_LOCK_DIR_NAME = "registry.lock";
@@ -368,12 +368,14 @@ function withBrokerRegistryLock(registration, options, action) {
   }
 }
 
+// The registry lives beside the per-workspace state dirs under the SAME
+// canonical root — a registry that moved with ambient CLAUDE_PLUGIN_DATA
+// split broker ownership across invocation contexts exactly like job state
+// did (a broker registered under one root was invisible to the session
+// resolving another). It is never null anymore: the canonical root always
+// resolves.
 export function resolveBrokerOwnershipRoot(env = process.env) {
-  const pluginDataDir = env?.[PLUGIN_DATA_ENV];
-  if (typeof pluginDataDir !== "string" || !path.isAbsolute(pluginDataDir)) {
-    return null;
-  }
-  return path.join(pluginDataDir, "state", REGISTRY_DIR_NAME);
+  return path.join(resolveStateRoot(env ?? process.env), REGISTRY_DIR_NAME);
 }
 
 export function brokerOwnershipKey(endpoint, brokerIdentity) {
@@ -382,7 +384,7 @@ export function brokerOwnershipKey(endpoint, brokerIdentity) {
 
 export function loadBrokerRegistration({ endpoint, brokerIdentity, env = process.env }) {
   const registryRoot = resolveBrokerOwnershipRoot(env);
-  if (!registryRoot || typeof endpoint !== "string" || !endpoint || typeof brokerIdentity !== "string" || !brokerIdentity) {
+  if (typeof endpoint !== "string" || !endpoint || typeof brokerIdentity !== "string" || !brokerIdentity) {
     return { registered: false, reason: "missing-registration-identity" };
   }
   const registration = registrationReference(registryRoot, brokerOwnershipKey(endpoint, brokerIdentity));
@@ -447,9 +449,6 @@ export function loadBrokerTerminal(registration) {
 
 export function publishBrokerRegistration({ cwd, endpoint, pid, ownershipSnapshot, env = process.env, now = () => new Date().toISOString() }) {
   const registryRoot = resolveBrokerOwnershipRoot(env);
-  if (!registryRoot) {
-    return { registered: false, reason: "plugin-data-unavailable" };
-  }
   if (
     typeof endpoint !== "string" ||
     !endpoint ||
@@ -518,9 +517,6 @@ export function publishRegisteredBroker({
   retainRegistryLock = false
 }) {
   const registryRoot = resolveBrokerOwnershipRoot(env);
-  if (!registryRoot) {
-    return { registered: false, reason: "plugin-data-unavailable" };
-  }
   const owner = ownerFromEnv(env);
   if (!owner) {
     return { registered: false, reason: "session-owner-unavailable" };

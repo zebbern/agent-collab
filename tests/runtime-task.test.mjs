@@ -444,11 +444,47 @@ test("session start hook exports session context and a stable owner when availab
   const exported = fs.readFileSync(envFile, "utf8");
   assert.match(exported, /export CODEX_COMPANION_SESSION_ID='sess-current'/);
   assert.match(exported, new RegExp(`export CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
-  assert.match(exported, new RegExp(`export CLAUDE_PLUGIN_DATA='${pluginDataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
+  // The hook must NOT re-export its own install's data dir session-wide:
+  // that ambient export is what split state roots across invocation contexts
+  // (per-marketplace installs, stale uninstalled instances, cursor Bash
+  // inheriting codex's dir). The canonical state root made it unnecessary.
+  assert.doesNotMatch(exported, /export CLAUDE_PLUGIN_DATA=/);
   if (process.platform !== "win32") {
     assert.match(exported, /export CODEX_COMPANION_SESSION_OWNER_PID='\d+'/);
     assert.match(exported, /export CODEX_COMPANION_SESSION_OWNER_IDENTITY='\d+@[^']+'/);
   }
+});
+
+test("jobs land under the canonical root no matter what CLAUDE_PLUGIN_DATA says at launch or status time", () => {
+  // The live failure this pins: a job launched in a Bash env carrying one
+  // install's exported data dir, then status run in a context carrying a
+  // different one — "No job found", orphaned workers. Canonical root makes
+  // both contexts resolve the same state.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+
+  const launchAmbient = makeTempDir();
+  const statusAmbient = makeTempDir();
+  const launch = run("node", [SCRIPT, "task", "check the build"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CLAUDE_PLUGIN_DATA: launchAmbient }
+  });
+  assert.equal(launch.status, 0, launch.stderr);
+
+  const status = run("node", [SCRIPT, "status", "--json"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CLAUDE_PLUGIN_DATA: statusAmbient }
+  });
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  const visibleJobs = [...payload.running, payload.latestFinished, ...payload.recent].filter(Boolean);
+  assert.ok(visibleJobs.length > 0, `status lost the job across ambient contexts: ${status.stdout}`);
+
+  // Neither ambient dir may gain a state tree.
+  assert.equal(fs.existsSync(path.join(launchAmbient, "state")), false);
+  assert.equal(fs.existsSync(path.join(statusAmbient, "state")), false);
 });
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {

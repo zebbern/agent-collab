@@ -17,6 +17,10 @@ import {
 
 const SCRIPT = fileURLToPath(new URL("../plugins/cursor/scripts/cursor-companion.mjs", import.meta.url));
 
+// Keep every state write inside a temp canonical root — never the real
+// per-user ~/.claude/cursor-companion.
+process.env.CURSOR_COMPANION_STATE_ROOT = makeTempDir("cursor-plugin-doctor-root-");
+
 test("cursor doctor runner aggregates statuses like the codex copy", async () => {
   const report = await runDoctorChecks([
     { id: "fine", run: () => ({ status: "ok", message: "all good" }) },

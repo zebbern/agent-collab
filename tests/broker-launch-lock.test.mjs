@@ -11,6 +11,10 @@ import assert from "node:assert/strict";
 import { makeTempDir } from "./helpers.mjs";
 import { acquireBrokerLaunchLock, brokerLaunchLockPort } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 
+// Keep every state write inside a temp canonical root — never the real
+// per-user ~/.claude/codex-companion.
+process.env.CODEX_COMPANION_STATE_ROOT = makeTempDir("codex-plugin-launch-lock-root-");
+
 // The lock port is hash-derived from the workspace path; Windows reserves
 // whole port ranges (Hyper-V/WSL) where listening fails EACCES. Sample fresh
 // workspaces until one binds — production routes excluded ports through the
