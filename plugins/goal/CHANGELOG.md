@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Retro events and evaluate-prior-adoptions: `retro-record` appends a `retro`
+  ledger event (scope, disposition count, floor verdict, optional proposal PR
+  and findings count), and `/goal:retro` now requires evaluating prior
+  adoptions before proposing new method changes — adopted method changes were
+  previously unmeasurable, so successors could not tell whether a prior
+  proposal helped, hurt, or should be reversed.
+
 ## 0.3.0
 
 - The goal-runner skill gained a start-before-working rail from the first portfolio retrospective (PR #33): call start before any work on an increment begins, or the duration is untrustworthy and the retro discards it.

@@ -89,7 +89,7 @@ test("goal retro command pins its frontmatter and hard rules", () => {
   assert.match(retro, /skill wording, routing guidance, effort tiers, budgets/);
 });
 
-test("goal retro command pins the four-event ledger vocabulary and the goal-file-wins rule", () => {
+test("goal retro command pins the five-event ledger vocabulary and the goal-file-wins rule", () => {
   const retro = read(path.join("commands", "retro.md"));
   // The ledger's full event vocabulary, named together. \s+ rather than a
   // literal \n: this phrase wraps a line, and a Windows checkout without a
@@ -97,7 +97,10 @@ test("goal retro command pins the four-event ledger vocabulary and the goal-file
   // never depend on which line ending git handed it (this exact pin turned CI
   // red on 2026-08-07 while both local gate legs, reading an LF working tree,
   // stayed green).
-  assert.match(retro, /`step-started`, `disposition`, `closed`, and\s+`correction`/);
+  assert.match(
+    retro,
+    /`step-started`, `disposition`, `closed`,\s+`correction`, and\s+`retro`/
+  );
   // A correction is an append-only reversal, never a rewrite.
   assert.match(retro, /never rewrites history/);
   assert.match(retro, /supersedes/);
@@ -107,6 +110,15 @@ test("goal retro command pins the four-event ledger vocabulary and the goal-file
   // closed events feed the retro's goal-level analysis.
   assert.match(retro, /Goal-level outcomes and their timing/);
   assert.match(retro, /`closed` event/);
+});
+
+test("goal retro command pins evaluate-prior-adoptions and record-itself", () => {
+  const retro = read(path.join("commands", "retro.md"));
+  assert.match(retro, /Evaluate prior adoptions/);
+  assert.match(retro, /too thin\s+to judge this adoption yet/);
+  assert.match(retro, /REVERSAL a\s+legitimate finding/);
+  assert.match(retro, /leaves no trace cannot be evaluated by its successor/);
+  assert.match(retro, /goal-companion\.mjs" retro-record/);
 });
 
 test("goal retro command pins the two scopes and the method-invention mandate", () => {

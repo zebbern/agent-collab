@@ -20,6 +20,7 @@ function printUsage() {
       "  node scripts/goal-companion.mjs record <slug> <itemId> --disposition <merged|discarded|dropped|blocked> [--pr <n>] [--delegate <codex|cursor|none>] [--notes <text>] [--json]",
       "  node scripts/goal-companion.mjs check [slug] [--json]",
       "  node scripts/goal-companion.mjs ledger [slug|--all] [--json]",
+      "  node scripts/goal-companion.mjs retro-record [slug|--all] [--pr <n>] [--findings <n>] [--notes <text>] [--json]",
       "  node scripts/goal-companion.mjs close <slug> (--done|--abandoned) [--json]",
       "  node scripts/goal-companion.mjs help",
       "",
@@ -47,11 +48,22 @@ function countItems(goal) {
   return counts;
 }
 
-// Shared one-line rendering for all four ledger event shapes
-// (step-started, disposition, closed, correction). Each field is only
+// Shared one-line rendering for all five ledger event shapes
+// (step-started, disposition, closed, correction, retro). Each field is only
 // appended when present, so an event missing e.g. itemId never renders the
 // literal string "undefined".
 function formatLedgerLine(entry) {
+  if (entry.event === "retro") {
+    const segments = [
+      "retro",
+      entry.scope,
+      `dispositions=${entry.dispositions}`,
+      entry.floorMet ? "floor-met" : "floor-refused"
+    ];
+    if (entry.pr) segments.push(`PR#${entry.pr}`);
+    if (entry.findings !== undefined) segments.push(`findings=${entry.findings}`);
+    return `${entry.at} ${segments.join(" ")}`;
+  }
   const segments = [entry.event];
   if (entry.disposition) segments.push(entry.disposition);
   if (entry.status) segments.push(entry.status);
@@ -437,6 +449,90 @@ async function handleLedger(argv) {
   );
 }
 
+async function handleRetroRecord(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "pr", "findings", "notes"],
+    booleanOptions: ["json", "all"]
+  });
+  const cwd = resolveCommandCwd(options);
+
+  let pr;
+  if (options.pr !== undefined) {
+    pr = Number(options.pr);
+    if (!Number.isInteger(pr) || pr <= 0) {
+      throw new Error("--pr must be a positive integer");
+    }
+  }
+  let findings;
+  if (options.findings !== undefined) {
+    findings = Number(options.findings);
+    if (!Number.isInteger(findings) || findings < 0) {
+      throw new Error("--findings must be a non-negative integer");
+    }
+  }
+
+  // Scope resolution mirrors handleLedger exactly: --all is portfolio over
+  // listGoalFiles (refuse a slug positional; refuse an empty project);
+  // otherwise resolveGoal for a per-goal view.
+  let scope;
+  let slug;
+  let scopedEntries;
+  if (options.all) {
+    if (positionals.length > 0) {
+      throw new Error("retro-record --all takes no slug; drop one or the other.");
+    }
+    const goals = listGoalFiles(cwd).map((entry) => entry.slug);
+    if (goals.length === 0) {
+      throw new Error(`No goal files found under ${goalsDir(cwd)}. Create one with /goal:set.`);
+    }
+    scope = "portfolio";
+    slug = "(portfolio)";
+    const { entries } = readLedger(cwd);
+    scopedEntries = entries;
+  } else {
+    const resolved = resolveGoal(cwd, positionals[0] ?? "");
+    scope = "per-goal";
+    slug = resolved.slug;
+    const { entries } = readLedger(cwd);
+    scopedEntries = entries.filter((entry) => entry.slug === slug);
+  }
+
+  // Count disposition events at this scope at invocation time — never accept
+  // a caller-supplied count. Recording floorMet false is valid; a refusal is
+  // a data point for the next retro.
+  const dispositions = scopedEntries.filter((entry) => entry.event === "disposition").length;
+  const floorMet = dispositions >= 5;
+
+  appendLedger(cwd, {
+    slug,
+    event: "retro",
+    scope,
+    dispositions,
+    floorMet,
+    ...(pr !== undefined ? { pr } : {}),
+    ...(findings !== undefined ? { findings } : {}),
+    ...(options.notes !== undefined ? { notes: options.notes } : {})
+  });
+
+  const payload = {
+    scope,
+    ...(scope === "per-goal" ? { slug } : {}),
+    dispositions,
+    floorMet,
+    ...(pr !== undefined ? { pr } : {}),
+    ...(findings !== undefined ? { findings } : {})
+  };
+  const floorLabel = floorMet ? "floor-met" : "floor-refused";
+  const parts = [
+    `retro ${scope}`,
+    `dispositions=${dispositions}`,
+    floorLabel,
+    ...(pr !== undefined ? [`PR#${pr}`] : []),
+    ...(findings !== undefined ? [`findings=${findings}`] : [])
+  ];
+  output(payload, `${parts.join(" ")}\n`, options.json);
+}
+
 async function handleClose(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -518,6 +614,9 @@ async function main() {
       return;
     case "ledger":
       await handleLedger(argv);
+      return;
+    case "retro-record":
+      await handleRetroRecord(argv);
       return;
     case "close":
       await handleClose(argv);
