@@ -26,7 +26,9 @@ judgment (executing, routing, presenting).**
 - **Unattended operation.** The loop advances only in an open session
   (`/goal:step`, optionally driven by `/loop` while the user watches).
   Nothing in the formats may preclude a later cron trigger, but no
-  scheduling surface ships.
+  scheduling surface ships. The trigger-level recipe (never-merge, wake
+  reconciliation, `goal/<slug>/<itemId>` work branches) is now documented in
+  step.md; scheduling remains the platform's job and PR-merge stays human.
 - **Intra-step parallelism via file-claiming.** If a goal step ever warrants
   fan-out, it uses the harness's native subagents/workflows. A shared task
   list with read-modify-write "atomic" claiming (swarm-style) is rejected:

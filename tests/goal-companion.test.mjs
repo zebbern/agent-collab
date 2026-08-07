@@ -250,6 +250,58 @@ test("status reports a ledger tail scoped to the resolved goal", () => {
   assert.match(text.stdout, /step-started/);
 });
 
+test("ledger filters entries to the requested slug and surfaces corrupt-line counts", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, { slug: "goal-a" });
+  writeGoalFixture(project, { slug: "goal-b" });
+
+  companion(["start", "goal-a", "first-item"], project);
+  companion(["record", "goal-a", "first-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  companion(["start", "goal-b", "first-item"], project);
+
+  const ledger = companion(["ledger", "goal-a", "--json"], project);
+  assert.equal(ledger.status, 0, ledger.stderr);
+  const payload = JSON.parse(ledger.stdout);
+  assert.equal(payload.slug, "goal-a");
+  assert.equal(payload.entries.length, 2);
+  assert.ok(payload.entries.every((entry) => entry.slug === "goal-a"));
+  assert.equal(payload.corruptLedgerLines, 0);
+
+  fs.appendFileSync(path.join(stateDir(project), "ledger.jsonl"), "{torn write\n");
+  const withTorn = companion(["ledger", "goal-a"], project);
+  assert.equal(withTorn.status, 0, withTorn.stderr);
+  assert.match(withTorn.stdout, /1 corrupt line/);
+});
+
+test("ledger's slug resolution refuses ambiguity exactly like status", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, { slug: "goal-a" });
+  writeGoalFixture(project, { slug: "goal-b" });
+
+  const ambiguous = companion(["ledger"], project);
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stderr, /goal-a.*goal-b|goal-b.*goal-a/s);
+
+  const missing = companion(["ledger", "goal-c"], project);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /goal-c.*not found.*goal-a/s);
+});
+
+test("ledger is read-only history: it works on a closed (non-active) goal", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  companion(["record", "test-goal", "first-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  companion(["record", "test-goal", "second-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  const abandoned = companion(["close", "test-goal", "--abandoned"], project);
+  assert.equal(abandoned.status, 0, abandoned.stderr);
+
+  const ledger = companion(["ledger", "test-goal", "--json"], project);
+  assert.equal(ledger.status, 0, ledger.stderr);
+  const payload = JSON.parse(ledger.stdout);
+  assert.equal(payload.slug, "test-goal");
+  assert.equal(payload.entries.length, 2);
+});
+
 test("record enforces the state machine and blocked halts the goal", () => {
   const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
