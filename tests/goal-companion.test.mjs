@@ -45,6 +45,16 @@ test("parseCommandInput refuses unknown options and missing values", () => {
   );
 });
 
+test("parseCommandInput refuses a typo'd short flag instead of absorbing it as a positional", () => {
+  assert.throws(
+    () => parseCommandInput(["status", "-x", "slug"], { valueOptions: [], booleanOptions: [] }),
+    /Unknown option: -x/
+  );
+  // -C keeps resolving cwd unaffected by the new short-flag guard.
+  const { options } = parseCommandInput(["-C", "C:/proj"], { valueOptions: [], booleanOptions: [] });
+  assert.equal(options.cwd, "C:/proj");
+});
+
 function makeGoal(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -92,6 +102,22 @@ test("validateGoal accepts the reference shape and names every violation", () =>
 test("validateGoal refuses an unknown top-level key by name", () => {
   const errors = validateGoal(makeGoal({ blockedReson: "typo" }));
   assert.ok(errors.some((error) => /unknown key "blockedReson"/.test(error)), errors.join("; "));
+});
+
+test("validateGoal requires createdAt/updatedAt, when present, to be date-parseable strings", () => {
+  const badCreated = validateGoal(makeGoal({ createdAt: 12345 }));
+  assert.ok(
+    badCreated.some((error) => /createdAt must be a date-parseable string when present/.test(error)),
+    badCreated.join("; ")
+  );
+
+  const badUpdated = validateGoal(makeGoal({ updatedAt: "not-a-date" }));
+  assert.ok(
+    badUpdated.some((error) => /updatedAt must be a date-parseable string when present/.test(error)),
+    badUpdated.join("; ")
+  );
+
+  assert.deepEqual(validateGoal(makeGoal({ createdAt: "2026-08-07T00:00:00.000Z" })), []);
 });
 
 test("saveGoal writes atomically and resolveGoal round-trips", () => {
@@ -147,6 +173,42 @@ test("ledger appends under the plugin-data override and tolerates corrupt lines"
   assert.equal(corruptCount, 1);
   assert.equal(entries[0].event, "step-started");
   assert.ok(typeof entries[0].at === "string" && entries[0].at.includes("T"));
+});
+
+test("appendLedger refuses a pre-planted regular FILE at the leaf state-dir path", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const leaf = stateDir(project);
+  fs.mkdirSync(path.dirname(leaf), { recursive: true });
+  fs.writeFileSync(leaf, "not a directory");
+
+  assert.throws(
+    () => appendLedger(project, { slug: "g", itemId: "i", event: "step-started" }),
+    /not a private directory/
+  );
+});
+
+test("appendLedger refuses a pre-planted SYMLINK at the leaf state-dir path", (t) => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const leaf = stateDir(project);
+  fs.mkdirSync(path.dirname(leaf), { recursive: true });
+  const elsewhere = makeTempDir("goal-plugin-test-symlink-target-");
+  try {
+    fs.symlinkSync(elsewhere, leaf, "dir");
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip("Symlink creation requires elevated privileges on this platform.");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => appendLedger(project, { slug: "g", itemId: "i", event: "step-started" }),
+    /not a private directory/
+  );
+  // No write-through: the refusal must come before anything lands under the
+  // symlink target.
+  assert.equal(fs.existsSync(path.join(elsewhere, "ledger.jsonl")), false);
 });
 
 function writeGoalFixture(project, overrides = {}) {
@@ -416,6 +478,25 @@ test("check reports a timed-out criterion honestly, not as a plain failure", () 
   assert.equal(timedOut.status, 1);
   assert.match(timedOut.stdout, /ETIMEDOUT|timed?[ -]?out/i);
   assert.match(timedOut.stdout, /may still be running/);
+});
+
+test("check's rendered line omits the timeout caveat for a non-timeout spawn failure", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, {
+    // Exceeds spawnSync's default 1MB stdout buffer, producing a real
+    // outcome.error (ENOBUFS) that is NOT a timeout — the honest-suffix
+    // fix must not claim "its processes may still be running" here.
+    acceptanceCriteria: [
+      {
+        kind: "command",
+        run: "node -e \"process.stdout.write(String(1).repeat(2000000))\"",
+        expect: "exit0"
+      }
+    ]
+  });
+  const failing = companion(["check"], project);
+  assert.equal(failing.status, 1);
+  assert.doesNotMatch(failing.stdout, /may still be running/);
 });
 
 test("close --done refuses while work remains, succeeds when the backlog is settled", () => {

@@ -19,6 +19,10 @@ export function parseCommandInput(argv, { valueOptions = [], booleanOptions = []
       i += 1;
       continue;
     }
+    if (token === "--") {
+      positionals.push(token);
+      continue;
+    }
     if (token.startsWith("--")) {
       const name = token.slice(2);
       if (booleanOptions.includes(name)) {
@@ -34,6 +38,13 @@ export function parseCommandInput(argv, { valueOptions = [], booleanOptions = []
         i += 1;
         continue;
       }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    // Any remaining "-"-prefixed token (a short flag other than -C, e.g. a
+    // typo like -x) is refused rather than silently absorbed as positional
+    // data. Safe to do unconditionally: no goal-companion argument is ever a
+    // negative number, so this can never misclassify real positional input.
+    if (token.startsWith("-")) {
       throw new Error(`Unknown option: ${token}`);
     }
     positionals.push(token);

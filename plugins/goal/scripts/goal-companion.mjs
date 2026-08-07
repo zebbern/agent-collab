@@ -358,6 +358,25 @@ function runCheck(cwd, goal) {
   return { results, passed };
 }
 
+// The "may still be running" caveat is only honest for a criterion that
+// actually timed out — a spawn EACCES or ENOBUFS never left a process
+// behind, and claiming it might is its own small dishonesty.
+const TIMED_OUT_DETAIL_PATTERN = /ETIMEDOUT|timed[ -]?out/i;
+
+function renderCheckLine(result) {
+  if (result.outcome === "manual") {
+    return `- [manual] ${result.label}`;
+  }
+  let detailSuffix = "";
+  if (result.detail) {
+    const timeoutCaveat = TIMED_OUT_DETAIL_PATTERN.test(result.detail)
+      ? "; its processes may still be running"
+      : "";
+    detailSuffix = ` — ${result.detail}${timeoutCaveat}`;
+  }
+  return `- [${result.outcome}] ${result.label} (exit ${result.exitCode ?? "n/a"}${detailSuffix})`;
+}
+
 async function handleCheck(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -366,13 +385,7 @@ async function handleCheck(argv) {
   const cwd = resolveCommandCwd(options);
   const { slug, goal } = resolveGoal(cwd, positionals[0] ?? "");
   const { results, passed } = runCheck(cwd, goal);
-  const rendered = results
-    .map((result) =>
-      result.outcome === "manual"
-        ? `- [manual] ${result.label}`
-        : `- [${result.outcome}] ${result.label} (exit ${result.exitCode ?? "n/a"}${result.detail ? ` — ${result.detail}; its processes may still be running` : ""})`
-    )
-    .join("\n");
+  const rendered = results.map(renderCheckLine).join("\n");
   output({ slug, results, passed }, `${rendered}\n${passed ? "All command criteria pass." : "Command criteria FAILED."}\n`, options.json);
   if (!passed) {
     process.exitCode = 1;

@@ -6,10 +6,17 @@ export const GOAL_STATUSES = ["active", "blocked", "done", "abandoned"];
 export const ITEM_STATUSES = ["todo", "in-progress", "merged", "discarded", "dropped", "blocked"];
 export const TERMINAL_ITEM_STATUSES = ["merged", "discarded", "dropped", "blocked"];
 
-const SLUG_PATTERN = /^[a-z0-9-]+$/;
+// Must START alphanumeric: a leading-hyphen slug or item id would read as an
+// option token to the CLI's strict flag parsing, so it is refused here at the
+// validation layer instead of surfacing as a confusing "Unknown option".
+const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isDateParseableString(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 const GOAL_KEYS = new Set([
@@ -55,7 +62,7 @@ export function validateGoal(value) {
     errors.push(`schemaVersion must be ${GOAL_SCHEMA_VERSION}`);
   }
   if (!isNonEmptyString(value.slug) || !SLUG_PATTERN.test(value.slug)) {
-    errors.push("slug must be a non-empty [a-z0-9-]+ string");
+    errors.push("slug must be lowercase [a-z0-9-] and start with a letter or digit");
   }
   if (!isNonEmptyString(value.statement)) {
     errors.push("statement must be a non-empty string");
@@ -99,7 +106,7 @@ export function validateGoal(value) {
       }
       checkUnknownKeys(item, ITEM_KEYS, label, errors);
       if (!isNonEmptyString(item.id) || !SLUG_PATTERN.test(item.id)) {
-        errors.push(`${label}.id must be a non-empty [a-z0-9-]+ string`);
+        errors.push(`${label}.id must be lowercase [a-z0-9-] and start with a letter or digit`);
       } else if (seen.has(item.id)) {
         errors.push(`${label}.id "${item.id}" is a duplicate`);
       } else {
@@ -151,6 +158,12 @@ export function validateGoal(value) {
   }
   if (value.status === "blocked" && !isNonEmptyString(value.blockedReason)) {
     errors.push("blockedReason must be a non-empty string while status is blocked");
+  }
+  if (value.createdAt !== undefined && !isDateParseableString(value.createdAt)) {
+    errors.push("createdAt must be a date-parseable string when present");
+  }
+  if (value.updatedAt !== undefined && !isDateParseableString(value.updatedAt)) {
+    errors.push("updatedAt must be a date-parseable string when present");
   }
   return errors;
 }

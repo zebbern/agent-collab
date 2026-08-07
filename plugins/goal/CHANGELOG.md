@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Hardening pass on four items accepted as debt in the 0.2.0 review: (1)
+  `ledger.mjs` now builds the sibling plugins' private-dir doctrine
+  goal-locally — 0o700 root created recursively, the per-project leaf created
+  non-recursively (so a pre-planted symlink or file fails instead of being
+  followed), and, off win32, foreign-uid refusal plus tightening a loose mode
+  back to 0o700; the state dir was previously documented as "default
+  permissions, hardening is the known upgrade" — it is now built. (2)
+  `args.mjs`'s `parseCommandInput` refuses any unrecognized `-`-prefixed
+  token (e.g. a typo'd `-x`) instead of silently absorbing it as a
+  positional; `-C` and bare `--` still pass through. (3) `goal-state.mjs`'s
+  `validateGoal` now requires `createdAt`/`updatedAt`, when present, to be
+  date-parseable strings, naming the exact field on failure. (4)
+  `goal-companion.mjs`'s `check` renderer scopes the "its processes may
+  still be running" caveat to details that actually indicate a timeout — a
+  plain spawn failure (EACCES, ENOBUFS, ENOENT, …) no longer carries that
+  claim.
+
 ## 0.2.0
 
 - Ledger corrections: dogfooding this plugin surfaced two dispositions
