@@ -23,11 +23,12 @@ This skill is the policy and the loop for delegating work to Codex without a `/c
 Fire — start the job in the background:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background [--write] [--effort <tier>] "<prompt>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background [--write] [--profile <deep|fast>] [--effort <tier>] "<prompt>"
 ```
 
 - The output line `started in the background as <jobId>` carries the job id. Record it.
 - Add `--write` only when Codex is supposed to edit files; leave it off for analysis and second opinions.
+- `--profile <deep|fast>` is accepted on `task` (and its `rescue` forwarder) only; `review` and `adversarial-review` reject it.
 - This fire → await → collect loop is for `task` only. Reviews detach differently — see below.
 
 Await — issue the wait as a background Bash task so the harness notifies on completion instead of blocking the session:

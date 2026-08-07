@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Cursor rescue subagent
-argument-hint: "[--background|--wait] [--resume <chat-id>] [--model <model>] [what Cursor should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume <chat-id>] [--profile deep|fast] [--model <model>] [what Cursor should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -17,7 +17,7 @@ Execution mode:
 - If the request includes `--wait`, run the `cursor:cursor-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model` and `--resume <chat-id>` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--model`, `--profile deep|fast`, and `--resume <chat-id>` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text. An explicit `--model` overrides `--profile`'s model; there is no `--effort` flag.
 - Cursor resume always needs an explicit chat id (from `/cursor:status` or `/cursor:result`); there is no resume-last shortcut, so never ask whether to continue a previous session.
 
 Operating rules:

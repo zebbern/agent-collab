@@ -263,6 +263,129 @@ test("write-mode task passes --force while read mode never does", () => {
   assert.equal(readFakeState(binDir).lastArgs.includes("--force"), false);
 });
 
+test("task --profile resolves each named profile to its Cursor model", () => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const expectedModels = {
+    deep: "gpt-5.6-sol-xhigh",
+    fast: "cursor-grok-4.5-high-fast"
+  };
+
+  for (const [profile, expectedModel] of Object.entries(expectedModels)) {
+    const result = run("node", [SCRIPT, "task", "--profile", profile, `check the ${profile} profile`], {
+      cwd: repo,
+      env: buildCursorEnv(binDir)
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const args = readFakeState(binDir).lastArgs;
+    const modelIndex = args.indexOf("--model");
+    assert.notEqual(modelIndex, -1, JSON.stringify(args));
+    assert.equal(args[modelIndex + 1], expectedModel);
+    // Cursor has no effort concept: a profile carries a model only.
+    assert.equal(args.includes("--effort"), false);
+  }
+});
+
+test("task --model overrides the selected profile's model", () => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run(
+    "node",
+    [SCRIPT, "task", "--profile", "deep", "--model", "composer-1-test", "check the override"],
+    {
+      cwd: repo,
+      env: buildCursorEnv(binDir)
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const args = readFakeState(binDir).lastArgs;
+  const modelIndex = args.indexOf("--model");
+  assert.notEqual(modelIndex, -1);
+  assert.equal(args[modelIndex + 1], "composer-1-test");
+
+  const { storedJob } = readLatestJob(repo);
+  assert.equal(storedJob.result.model, "composer-1-test");
+});
+
+test("task rejects an unknown profile before invoking cursor-agent", () => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run("node", [SCRIPT, "task", "--profile", "bogus", "do something"], {
+    cwd: repo,
+    env: buildCursorEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsupported task profile "bogus"\. Use one of: deep, fast\./);
+
+  // The fake cursor-agent only records state once invoked with -p; a rejected
+  // profile must never reach that point.
+  assert.equal(fs.existsSync(path.join(binDir, "fake-cursor-state.json")), false);
+});
+
+test("task rejects an explicitly empty --profile before invoking cursor-agent", () => {
+  const repo = makeTaskRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run("node", [SCRIPT, "task", "--profile=", "do something"], {
+    cwd: repo,
+    env: buildCursorEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsupported task profile ""\. Use one of: deep, fast\./);
+  assert.equal(fs.existsSync(path.join(binDir, "fake-cursor-state.json")), false);
+});
+
+test("review rejects --profile as task/rescue-only", () => {
+  const repo = makeReviewRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run("node", [SCRIPT, "review", "--profile", "deep"], {
+    cwd: repo,
+    env: withTestBinaryOverride(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  // Both plugins word this rule identically apart from their own command
+  // names — a user switching plugins must not meet two phrasings of one rule.
+  assert.match(
+    result.stderr,
+    /--profile.*not supported by review or adversarial-review.*only.*\/cursor:task.*\/cursor:rescue/is
+  );
+  assert.equal(fs.existsSync(path.join(binDir, "fake-cursor-state.json")), false);
+});
+
+test("adversarial-review rejects --profile as task/rescue-only", () => {
+  const repo = makeReviewRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir);
+
+  const result = run("node", [SCRIPT, "adversarial-review", "--profile", "fast", "focus text"], {
+    cwd: repo,
+    env: withTestBinaryOverride(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  // Both plugins word this rule identically apart from their own command
+  // names — a user switching plugins must not meet two phrasings of one rule.
+  assert.match(
+    result.stderr,
+    /--profile.*not supported by review or adversarial-review.*only.*\/cursor:task.*\/cursor:rescue/is
+  );
+  assert.equal(fs.existsSync(path.join(binDir, "fake-cursor-state.json")), false);
+});
+
 test("task --resume passes --resume and keeps the prior chat id", () => {
   const repo = makeTaskRepo();
   const binDir = makeTempDir();
@@ -589,10 +712,14 @@ test("task --background enqueues a detached worker and result returns its output
   const binDir = makeTempDir();
   installFakeCursorAgent(binDir);
 
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate in the background"], {
-    cwd: repo,
-    env: buildCursorEnv(binDir)
-  });
+  const launched = run(
+    "node",
+    [SCRIPT, "task", "--background", "--profile", "fast", "--json", "investigate in the background"],
+    {
+      cwd: repo,
+      env: buildCursorEnv(binDir)
+    }
+  );
 
   assert.equal(launched.status, 0, launched.stderr);
   const launchPayload = JSON.parse(launched.stdout);
@@ -624,6 +751,14 @@ test("task --background enqueues a detached worker and result returns its output
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
   assert.equal(resultPayload.storedJob.result.transport, "native");
+
+  // The background worker's request payload must carry the profile-resolved
+  // model, not just the foreground path.
+  const fakeState = readFakeState(binDir);
+  const args = fakeState.lastArgs;
+  const modelIndex = args.indexOf("--model");
+  assert.notEqual(modelIndex, -1, JSON.stringify(args));
+  assert.equal(args[modelIndex + 1], "cursor-grok-4.5-high-fast");
 });
 
 test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {

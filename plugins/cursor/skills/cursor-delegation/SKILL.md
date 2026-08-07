@@ -23,7 +23,7 @@ This skill is the policy and the loop for delegating work to Cursor without a `/
 Fire — start the job in the background:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/cursor-companion.mjs" task --background [--write] [--model <model>] "<prompt>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/cursor-companion.mjs" task --background [--write] [--profile deep|fast] [--model <model>] "<prompt>"
 ```
 
 - The output line `started in the background as <jobId>` carries the job id. Record it.
@@ -68,7 +68,7 @@ Bash({
 ## Routing
 
 - Fast implementation, scaffolding, everyday review → `task` or `review`.
-- Leave the model unset by default — Cursor routes `auto` server-side. There is no `--effort` flag; depth is a model choice.
+- Leave the model unset by default — Cursor routes `auto` server-side. There is no `--effort` flag; depth is a model choice, and `--profile deep|fast` is a named shortcut for it on `task` only (`review`/`adversarial-review` reject `--profile`).
 
 ## Failure honesty
 
