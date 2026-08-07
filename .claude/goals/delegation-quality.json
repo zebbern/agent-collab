@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "slug": "delegation-quality",
+  "statement": "Land the deferred Direction-1 items: make model/effort selection a named profile instead of remembered ids, catch profile-id rot mechanically, and turn the startup metrics into a regression gate. Runs unattended to prove the /goal:step scheduled recipe end to end.",
+  "acceptanceCriteria": [
+    {
+      "kind": "command",
+      "run": "npm test",
+      "expect": "exit0",
+      "timeoutMs": 900000
+    },
+    {
+      "kind": "manual",
+      "text": "Every item merged or explicitly dropped with a reason recorded, and the unattended rails held on every step (branch per item, no self-merges, wake reconciliation)"
+    }
+  ],
+  "backlog": [
+    {
+      "id": "model-profiles",
+      "title": "Ship named model/effort profiles (--profile deep|fast) in both delegation plugins",
+      "detail": "CLAUDE.md encodes the routing policy as prose humans must remember: deep analysis -> codex gpt-5.6-sol --effort xhigh; fast iteration -> cursor-grok-4.5-high-fast. Replace remembering with a shipped default profile table each companion reads, exposed as --profile deep|fast on codex task/rescue and cursor task. Explicit --model/--effort still win over the profile. LIVE-VERIFY every model id against the real CLI before pinning it (codex --help / cursor-agent --list-models) — CLAUDE.md warns these names drift. Chassis-shaped if the table lands in a shared lib module: mirror via npm run sync-chassis and update drift pins. Tests in both runtime suites plus doc pins for the new flag; changelog entries.",
+      "status": "todo",
+      "disposition": null
+    },
+    {
+      "id": "profile-id-freshness",
+      "title": "Doctor check: warn when a pinned profile model id no longer exists in the live roster",
+      "detail": "A profile table pinning a model id that the provider has retired fails at delegation time with a confusing CLI error. Add a doctor check (shared chassis doctor.mjs, both plugins) that probes the provider's live model roster and warns — never errors — when a pinned profile id is absent, naming the profile and the id. Must be offline-safe: an unreachable or unparseable roster reports unauditable/unknown, never healthy and never a hard failure (the repo's unknown-is-not-healthy doctrine). Depends on model-profiles landing first. Tests in doctor.test.mjs and cursor-doctor.test.mjs with a faked roster probe.",
+      "status": "todo",
+      "disposition": null
+    },
+    {
+      "id": "startup-baselines",
+      "title": "Turn the startup metrics into a baseline/compare regression gate",
+      "detail": "metrics.jsonl already accumulates spawn->ready overhead per transport and doctor summarizes it, but nothing pins a baseline, so a regression is only visible to someone reading the numbers. Add a script (scripts/ style, plain .mjs) with --save-baseline (writes a committed baseline file of per-transport medians/p90 plus sample counts) and --compare (reads current metrics, reports deltas, exits non-zero past a stated threshold). Must refuse to compare against too few samples rather than reporting noise as a regression — same honesty floor doctrine as /goal:retro. Wire it as an optional leg or a documented command; do NOT make npm test depend on machine-specific timings.",
+      "status": "todo",
+      "disposition": null
+    },
+    {
+      "id": "goal-close-ledger-event",
+      "title": "Record a ledger event when a goal closes",
+      "detail": "Accepted debt from the goal plugin's final review: close --done/--abandoned changes goal status but writes no ledger line, so goal-level outcomes exist only in git and /goal:retro cannot see when or how goals ended. Append a close event (event: 'closed', with the final status) in handleClose, extend the ledger tests, and note it in the retro command's analysis list. Keep the v1 event vocabulary explicit — this makes it three: step-started, disposition, closed.",
+      "status": "todo",
+      "disposition": null
+    }
+  ],
+  "budget": {
+    "perStepDelegations": 2
+  },
+  "status": "active",
+  "blockedReason": null,
+  "createdAt": "2026-08-07T11:22:39.650Z",
+  "updatedAt": "2026-08-07T11:22:39.650Z"
+}
