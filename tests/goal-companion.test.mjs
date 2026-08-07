@@ -140,3 +140,67 @@ test("ledger appends under the plugin-data override and tolerates corrupt lines"
   assert.equal(entries[0].event, "step-started");
   assert.ok(typeof entries[0].at === "string" && entries[0].at.includes("T"));
 });
+
+function writeGoalFixture(project, overrides = {}) {
+  const goal = makeGoal(overrides);
+  fs.mkdirSync(path.join(project, ".claude", "goals"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, ".claude", "goals", `${goal.slug}.json`),
+    JSON.stringify(goal, null, 2)
+  );
+  return goal;
+}
+
+function companion(args, project) {
+  return run("node", [SCRIPT, ...args, "--cwd", project], { env: { ...process.env } });
+}
+
+test("set validates and writes; status reports counts and ledger health", () => {
+  const project = makeTempDir("goal-proj-");
+  const draft = path.join(makeTempDir("goal-draft-"), "goal.json");
+  fs.writeFileSync(draft, JSON.stringify(makeGoal()));
+
+  const set = companion(["set", "--file", draft, "--json"], project);
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal(JSON.parse(set.stdout).slug, "test-goal");
+
+  const status = companion(["status", "--json"], project);
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.equal(payload.counts.todo, 2);
+  assert.equal(payload.inProgress, null);
+  assert.equal(payload.corruptLedgerLines, 0);
+});
+
+test("set refuses malformed drafts with specifics", () => {
+  const project = makeTempDir("goal-proj-");
+  const draft = path.join(makeTempDir("goal-draft-"), "goal.json");
+  fs.writeFileSync(draft, JSON.stringify({ schemaVersion: 1, slug: "x" }));
+  const set = companion(["set", "--file", draft], project);
+  assert.equal(set.status, 1);
+  assert.match(set.stderr, /statement must be a non-empty string/);
+});
+
+test("next returns the first todo and refuses on non-active goals", () => {
+  const project = makeTempDir("goal-proj-");
+  writeGoalFixture(project);
+  const next = companion(["next", "--json"], project);
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(JSON.parse(next.stdout).item.id, "first-item");
+
+  const blockedProject = makeTempDir("goal-proj-");
+  writeGoalFixture(blockedProject, { status: "blocked", blockedReason: "waiting on a human" });
+  const refused = companion(["next"], blockedProject);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /blocked.*waiting on a human/s);
+});
+
+test("help prints usage and unknown subcommands refuse", () => {
+  const project = makeTempDir("goal-proj-");
+  const help = companion(["help"], project);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /goal-companion\.mjs set --file/);
+  const unknown = companion(["frobnicate"], project);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /Unknown subcommand: frobnicate/);
+});
