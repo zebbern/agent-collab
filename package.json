@@ -15,6 +15,8 @@
     "build": "tsc -p tsconfig.app-server.json",
     "sync-chassis": "node scripts/sync-chassis.mjs",
     "reap-test-residue": "node scripts/reap-test-residue.mjs",
+    "startup:baseline": "node scripts/startup-baseline.mjs --save-baseline",
+    "startup:compare": "node scripts/startup-baseline.mjs --compare",
     "test": "node scripts/run-tests.mjs",
     "verify": "node scripts/verify.mjs"
   },

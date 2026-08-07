@@ -322,6 +322,12 @@ npm run verify    # local pre-merge gate: build + native suite + dockerized Linu
 ```
 
 - **CI** runs the full suite on `ubuntu-latest` and `windows-latest` for every push and PR (~300 tests). Tests never require a real Codex/Cursor login — fake fixtures on `PATH` stand in for both CLIs.
+- **Startup baseline gate** (opt-in, not part of `npm test`/`npm run verify` — see [ADR 0008](docs/adr/0008-startup-baseline-gate.md)):
+  ```bash
+  npm run startup:baseline   # pin docs/startup-baseline.json from this machine's accumulated startup metrics
+  npm run startup:compare    # compare current metrics against that baseline; non-zero only past threshold
+  ```
+  Timings are machine-specific, so this never gates a merge — run it by hand when you care whether a change moved spawn→ready overhead. `--compare` refuses to judge a `(plugin, transport)` cell with fewer than 5 samples on either side (reported `UNCOMPARABLE`, never silently passed or failed); if no cell qualifies, it says so and exits 0 rather than implying a pass.
 - **Layout:** `plugins/codex` and `plugins/cursor` are self-contained Claude Code plugins; `tests/` covers both; `.claude-plugin/marketplace.json` is the marketplace manifest.
 - Windows contributors: everything works from Git Bash; npm scripts are shell-agnostic.
 
