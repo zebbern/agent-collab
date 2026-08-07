@@ -36,8 +36,8 @@
       "disposition": {
         "recordedAt": "2026-08-07T12:34:28.712Z",
         "pr": 20,
-        "delegate": "codex",
-        "notes": "Premise corrected by live probe: codex has no roster surface, so the check is honestly asymmetric; fixture taught --list-models rather than weakening the healthy-environment guard"
+        "delegate": "none",
+        "notes": "Premise corrected by live probe: codex has no roster surface, so the check is honestly asymmetric; fixture taught --list-models rather than weakening the healthy-environment guard [delegate corrected 2026-08-07: built by Claude subagents; no external delegate was used. The original record was wrong.]"
       },
       "startedAt": "2026-08-07T12:17:05.566Z"
     },
@@ -45,16 +45,22 @@
       "id": "startup-baselines",
       "title": "Turn the startup metrics into a baseline/compare regression gate",
       "detail": "metrics.jsonl already accumulates spawn->ready overhead per transport and doctor summarizes it, but nothing pins a baseline, so a regression is only visible to someone reading the numbers. Add a script (scripts/ style, plain .mjs) with --save-baseline (writes a committed baseline file of per-transport medians/p90 plus sample counts) and --compare (reads current metrics, reports deltas, exits non-zero past a stated threshold). Must refuse to compare against too few samples rather than reporting noise as a regression — same honesty floor doctrine as /goal:retro. Wire it as an optional leg or a documented command; do NOT make npm test depend on machine-specific timings.",
-      "status": "in-progress",
-      "disposition": null,
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-07T12:35:07.986Z",
+        "pr": 21,
+        "delegate": "none",
+        "notes": "Opt-in gate, not wired into verify (machine-specific timings); honesty floor live-verified reporting nothing-was-verified with no baseline [delegate corrected 2026-08-07: built by Claude subagents; no external delegate was used. The original record was wrong.]"
+      },
       "startedAt": "2026-08-07T12:34:47.630Z"
     },
     {
       "id": "goal-close-ledger-event",
-      "title": "Record a ledger event when a goal closes",
-      "detail": "Accepted debt from the goal plugin's final review: close --done/--abandoned changes goal status but writes no ledger line, so goal-level outcomes exist only in git and /goal:retro cannot see when or how goals ended. Append a close event (event: 'closed', with the final status) in handleClose, extend the ledger tests, and note it in the retro command's analysis list. Keep the v1 event vocabulary explicit — this makes it three: step-started, disposition, closed.",
-      "status": "todo",
-      "disposition": null
+      "title": "Record close events, and make ledger corrections auditable",
+      "detail": "Two gaps, same file and vocabulary. (1) close --done/--abandoned changes goal status but writes no ledger line, so goal-level outcomes exist only in git and /goal:retro cannot see when or how goals ended. (2) Found by dogfooding 2026-08-07: two dispositions were recorded with a WRONG --delegate value (claimed codex/cursor for work Claude subagents actually did). The goal file was hand-corrected via the documented edit+set path, but the ledger is append-only with no correction mechanism, so the wrong values remain and /goal:retro would read them as fact — poisoning the exact attribution the retro exists to compute. Fix: append a closed event in handleClose (final status), and have set diff terminal dispositions against the on-disk goal and append a correction event naming the item, field, old and new value, for each change — preserving append-only semantics the way an accounting reversal does rather than rewriting history. Update retro.md so a later correction supersedes the earlier disposition record and the goal file is the tiebreaker. Event vocabulary becomes four: step-started, disposition, closed, correction. Extend the ledger tests.",
+      "status": "in-progress",
+      "disposition": null,
+      "startedAt": "2026-08-07T12:36:23.012Z"
     }
   ],
   "budget": {
@@ -63,5 +69,5 @@
   "status": "active",
   "blockedReason": null,
   "createdAt": "2026-08-07T11:22:39.650Z",
-  "updatedAt": "2026-08-07T12:34:47.631Z"
+  "updatedAt": "2026-08-07T12:36:23.013Z"
 }
