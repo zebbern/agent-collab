@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Delegate work from Claude Code to other AI coding agents: Codex (community fork with Windows fixes) and Cursor, plus a goal plugin for long-horizon project goals.",
-    "version": "1.0.6+fork.4"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6+fork.4",
+      "version": "1.0.6+fork.5",
       "author": {
         "name": "zebbern"
       },
@@ -20,7 +20,7 @@
     {
       "name": "cursor",
       "description": "Use Cursor from Claude Code to review code or delegate tasks.",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "author": {
         "name": "zebbern"
       },
@@ -29,7 +29,7 @@
     {
       "name": "goal",
       "description": "Set a long-horizon goal in a project and advance it one increment at a time, delegating to Codex/Cursor.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": {
         "name": "zebbern"
       },
