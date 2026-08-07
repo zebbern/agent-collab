@@ -19,15 +19,22 @@
       "id": "model-profiles",
       "title": "Ship named model/effort profiles (--profile deep|fast) in both delegation plugins",
       "detail": "CLAUDE.md encodes the routing policy as prose humans must remember: deep analysis -> codex gpt-5.6-sol --effort xhigh; fast iteration -> cursor-grok-4.5-high-fast. Replace remembering with a shipped default profile table each companion reads, exposed as --profile deep|fast on codex task/rescue and cursor task. Explicit --model/--effort still win over the profile. LIVE-VERIFY every model id against the real CLI before pinning it (codex --help / cursor-agent --list-models) — CLAUDE.md warns these names drift. Chassis-shaped if the table lands in a shared lib module: mirror via npm run sync-chassis and update drift pins. Tests in both runtime suites plus doc pins for the new flag; changelog entries.",
-      "status": "todo",
-      "disposition": null
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-07T12:17:05.440Z",
+        "pr": 19,
+        "delegate": "codex",
+        "notes": "Design review delegated to Codex; it blocked a guessed deep|fast matrix and caught the adversarial-review focus-text swallow before it shipped"
+      },
+      "startedAt": "2026-08-07T11:23:00.436Z"
     },
     {
       "id": "profile-id-freshness",
       "title": "Doctor check: warn when a pinned profile model id no longer exists in the live roster",
       "detail": "A profile table pinning a model id that the provider has retired fails at delegation time with a confusing CLI error. Add a doctor check (shared chassis doctor.mjs, both plugins) that probes the provider's live model roster and warns — never errors — when a pinned profile id is absent, naming the profile and the id. Must be offline-safe: an unreachable or unparseable roster reports unauditable/unknown, never healthy and never a hard failure (the repo's unknown-is-not-healthy doctrine). Depends on model-profiles landing first. Tests in doctor.test.mjs and cursor-doctor.test.mjs with a faked roster probe.",
-      "status": "todo",
-      "disposition": null
+      "status": "in-progress",
+      "disposition": null,
+      "startedAt": "2026-08-07T12:17:05.566Z"
     },
     {
       "id": "startup-baselines",
@@ -50,5 +57,5 @@
   "status": "active",
   "blockedReason": null,
   "createdAt": "2026-08-07T11:22:39.650Z",
-  "updatedAt": "2026-08-07T11:22:39.650Z"
+  "updatedAt": "2026-08-07T12:17:05.567Z"
 }
