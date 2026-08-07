@@ -34,10 +34,33 @@ broker e2e tests — pipe backpressure, not correctness); a short settle window
 separates the legs because the suites spawn real detached processes and
 back-to-back legs measure contention instead of correctness.
 
+## Known blind spot: checkout conversion
+
+Both suite legs read the same bytes — the native run reads the working tree
+directly, and the docker run reads a copy of it. Neither observes what git
+hands a *fresh checkout on another platform*. So the gate is evidence about
+**content**, never about **checkout conversion**.
+
+This is not hypothetical. On 2026-08-07, hours after this ADR landed, a doc
+pin matching a literal `\n` across a line break turned `windows-latest` CI
+red while the local gate stayed fully green: CI checks out CRLF, the working
+tree was LF, and `and\n` cannot match `and\r\n`. A `.gitattributes`
+normalizing all text to LF now removes that class repo-wide, which matters
+here more than in most repos — doc tests pin exact strings, and
+`tests/chassis-drift.test.mjs` hashes the payload of a `git diff` between the
+two mirrored lib copies, so byte-level guards must not vary by platform.
+
+The general lesson stands regardless of that particular fix: a green local
+gate is not a substitute for CI, it is a filter that makes CI's answer
+cheaper to reach. Where the two disagree, CI is looking at something the
+gate structurally cannot see.
+
 ## Consequences
 
 - Merges are gated locally before anything is pushed; PR CI (ubuntu +
-  windows) remains the required remote check when it dispatches.
+  windows) remains the required remote check when it dispatches, and it is
+  the authority on anything checkout-shaped.
 - Skipping the docker leg is possible but loud: the exit is 0, the verdict is
   INCOMPLETE, and the leg reads UNVERIFIED.
-- "Gate: PASSED" means every leg actually ran and passed.
+- "Gate: PASSED" means every leg actually ran and passed — over one set of
+  bytes, on one checkout.
