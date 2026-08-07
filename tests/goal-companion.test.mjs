@@ -20,7 +20,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "goal", "scripts", "goal-companion.mjs");
 
 // Isolate goal-companion ledger state from any real plugin data on this host.
-process.env.CLAUDE_PLUGIN_DATA = makeTempDir("goal-plugin-state-");
+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("goal-plugin-test-state-");
 
 test("parseCommandInput handles flags, values, positionals, and the -C alias", () => {
   const { options, positionals } = parseCommandInput(
@@ -89,8 +89,13 @@ test("validateGoal accepts the reference shape and names every violation", () =>
   assert.ok(errors.some((error) => /disposition/.test(error)), errors.join("; "));
 });
 
+test("validateGoal refuses an unknown top-level key by name", () => {
+  const errors = validateGoal(makeGoal({ blockedReson: "typo" }));
+  assert.ok(errors.some((error) => /unknown key "blockedReson"/.test(error)), errors.join("; "));
+});
+
 test("saveGoal writes atomically and resolveGoal round-trips", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   const file = saveGoal(project, makeGoal());
   assert.equal(file, path.join(goalsDir(project), "test-goal.json"));
   assert.equal(fs.readdirSync(goalsDir(project)).length, 1); // no tmp residue
@@ -98,13 +103,16 @@ test("saveGoal writes atomically and resolveGoal round-trips", () => {
   const resolved = resolveGoal(project, "");
   assert.equal(resolved.slug, "test-goal");
   assert.equal(resolved.goal.backlog.length, 2);
+
+  const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(typeof stored.createdAt, "string");
 });
 
 test("resolveGoal refusals list what exists", () => {
-  const empty = makeTempDir("goal-proj-");
+  const empty = makeTempDir("goal-plugin-test-proj-");
   assert.throws(() => resolveGoal(empty, ""), /No goal files found/);
 
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   saveGoal(project, makeGoal({ slug: "goal-a" }));
   saveGoal(project, makeGoal({ slug: "goal-b" }));
   assert.throws(() => resolveGoal(project, ""), /goal-a.*goal-b|goal-b.*goal-a/s);
@@ -112,7 +120,7 @@ test("resolveGoal refusals list what exists", () => {
 });
 
 test("a hand-broken goal file refuses with specifics, never repairs", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   const file = saveGoal(project, makeGoal());
   fs.writeFileSync(file, "{not json");
   assert.throws(() => resolveGoal(project, "test-goal"), /test-goal\.json/);
@@ -122,7 +130,7 @@ test("a hand-broken goal file refuses with specifics, never repairs", () => {
 });
 
 test("ledger appends under the plugin-data override and tolerates corrupt lines", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   assert.ok(
     stateDir(project).startsWith(path.join(process.env.CLAUDE_PLUGIN_DATA, "goal-companion")),
     stateDir(project)
@@ -156,8 +164,8 @@ function companion(args, project) {
 }
 
 test("set validates and writes; status reports counts and ledger health", () => {
-  const project = makeTempDir("goal-proj-");
-  const draft = path.join(makeTempDir("goal-draft-"), "goal.json");
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const draft = path.join(makeTempDir("goal-plugin-test-draft-"), "goal.json");
   fs.writeFileSync(draft, JSON.stringify(makeGoal()));
 
   const set = companion(["set", "--file", draft, "--json"], project);
@@ -173,8 +181,8 @@ test("set validates and writes; status reports counts and ledger health", () => 
 });
 
 test("set refuses malformed drafts with specifics", () => {
-  const project = makeTempDir("goal-proj-");
-  const draft = path.join(makeTempDir("goal-draft-"), "goal.json");
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const draft = path.join(makeTempDir("goal-plugin-test-draft-"), "goal.json");
   fs.writeFileSync(draft, JSON.stringify({ schemaVersion: 1, slug: "x" }));
   const set = companion(["set", "--file", draft], project);
   assert.equal(set.status, 1);
@@ -182,13 +190,13 @@ test("set refuses malformed drafts with specifics", () => {
 });
 
 test("next returns the first todo and refuses on non-active goals", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   const next = companion(["next", "--json"], project);
   assert.equal(next.status, 0, next.stderr);
   assert.equal(JSON.parse(next.stdout).item.id, "first-item");
 
-  const blockedProject = makeTempDir("goal-proj-");
+  const blockedProject = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(blockedProject, { status: "blocked", blockedReason: "waiting on a human" });
   const refused = companion(["next"], blockedProject);
   assert.equal(refused.status, 1);
@@ -196,7 +204,7 @@ test("next returns the first todo and refuses on non-active goals", () => {
 });
 
 test("help prints usage and unknown subcommands refuse", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   const help = companion(["help"], project);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /goal-companion\.mjs set --file/);
@@ -206,7 +214,7 @@ test("help prints usage and unknown subcommands refuse", () => {
 });
 
 test("start enforces one in-progress item and records step-started", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
 
   const start = companion(["start", "test-goal", "first-item", "--json"], project);
@@ -222,8 +230,28 @@ test("start enforces one in-progress item and records step-started", () => {
   assert.equal(entries.at(-1).itemId, "first-item");
 });
 
+test("status reports a ledger tail scoped to the resolved goal", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  companion(["start", "test-goal", "first-item"], project);
+  companion(
+    ["record", "test-goal", "first-item", "--disposition", "dropped", "--notes", "n/a"],
+    project
+  );
+
+  const status = companion(["status", "--json"], project);
+  assert.equal(status.status, 0, status.stderr);
+  const payload = JSON.parse(status.stdout);
+  assert.equal(payload.ledgerTail.length, 2);
+  assert.ok(payload.ledgerTail.every((entry) => entry.slug === "test-goal"));
+
+  const text = companion(["status"], project);
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /step-started/);
+});
+
 test("record enforces the state machine and blocked halts the goal", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
 
   // todo -> merged is illegal; only dropped may skip in-progress.
@@ -254,7 +282,7 @@ test("record enforces the state machine and blocked halts the goal", () => {
 });
 
 test("record merged stores the disposition with pr and delegate", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   companion(["start", "test-goal", "first-item"], project);
   const record = companion(
@@ -282,7 +310,7 @@ test("record merged stores the disposition with pr and delegate", () => {
 });
 
 test("multi-word option values survive the spawn boundary verbatim", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   companion(["start", "test-goal", "first-item"], project);
   const record = companion(
@@ -300,7 +328,7 @@ test("multi-word option values survive the spawn boundary verbatim", () => {
 });
 
 test("check judges command criteria by exit code and lists manual ones", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   const pass = companion(["check", "--json"], project);
   assert.equal(pass.status, 0, pass.stderr);
@@ -308,7 +336,7 @@ test("check judges command criteria by exit code and lists manual ones", () => {
   assert.equal(passPayload.passed, true);
   assert.equal(passPayload.results.find((r) => r.kind === "manual").outcome, "manual");
 
-  const failing = makeTempDir("goal-proj-");
+  const failing = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(failing, {
     acceptanceCriteria: [{ kind: "command", run: "node -e \"process.exit(3)\"", expect: "exit0" }]
   });
@@ -317,8 +345,26 @@ test("check judges command criteria by exit code and lists manual ones", () => {
   assert.equal(JSON.parse(fail.stdout).passed, false);
 });
 
+test("check reports a timed-out criterion honestly, not as a plain failure", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, {
+    acceptanceCriteria: [
+      {
+        kind: "command",
+        run: "node -e \"setTimeout(()=>{},60000)\"",
+        expect: "exit0",
+        timeoutMs: 1500
+      }
+    ]
+  });
+  const timedOut = companion(["check"], project);
+  assert.equal(timedOut.status, 1);
+  assert.match(timedOut.stdout, /ETIMEDOUT|timed?[ -]?out/i);
+  assert.match(timedOut.stdout, /may still be running/);
+});
+
 test("close --done refuses while work remains, succeeds when the backlog is settled", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   const early = companion(["close", "test-goal", "--done"], project);
   assert.equal(early.status, 1);
@@ -331,8 +377,21 @@ test("close --done refuses while work remains, succeeds when the backlog is sett
   assert.equal(JSON.parse(done.stdout).status, "done");
 });
 
+test("closed goals are frozen: close --abandoned after close --done refuses", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  companion(["record", "test-goal", "first-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  companion(["record", "test-goal", "second-item", "--disposition", "dropped", "--notes", "n/a"], project);
+  const done = companion(["close", "test-goal", "--done"], project);
+  assert.equal(done.status, 0, done.stderr);
+
+  const abandoned = companion(["close", "test-goal", "--abandoned"], project);
+  assert.equal(abandoned.status, 1);
+  assert.match(abandoned.stderr, /already done/);
+});
+
 test("blocked is a full stop: record freezes and close --done refuses", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);
   companion(["start", "test-goal", "first-item"], project);
   companion(["record", "test-goal", "first-item", "--disposition", "blocked", "--notes", "stuck"], project);
@@ -357,7 +416,7 @@ test("blocked is a full stop: record freezes and close --done refuses", () => {
 });
 
 test("close --done refuses a hand-edited active goal that still carries a blocked item", () => {
-  const project = makeTempDir("goal-proj-");
+  const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project, {
     backlog: [
       { id: "stuck-item", title: "stuck", status: "blocked", disposition: { recordedAt: "2026-08-07T00:00:00.000Z", notes: "stuck" } },

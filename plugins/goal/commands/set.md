@@ -1,6 +1,8 @@
 ---
 description: Create or update a long-horizon goal for this project
 argument-hint: "[description of the goal]"
+disable-model-invocation: true
+allowed-tools: Bash(node:*)
 ---
 
 Create or update a goal file for this project.
@@ -13,6 +15,9 @@ Create or update a goal file for this project.
 3. Run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/goal-companion.mjs" set --file <temp-path>`
    The companion validates and writes `.claude/goals/<slug>.json`; if it
    refuses, fix exactly what it names and re-run — never bypass validation.
+   Renaming a slug: `set` writes the new file and never deletes the old one —
+   remove `.claude/goals/<old-slug>.json` yourself, or `status`/`next` will
+   refuse listing both.
 4. Show the result of `node "${CLAUDE_PLUGIN_ROOT}/scripts/goal-companion.mjs" status <slug>`.
 5. Remind the user the goal file is git-tracked project content: commit it.
 

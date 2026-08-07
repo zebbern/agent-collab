@@ -1,6 +1,8 @@
 ---
 description: Show the project goal's progress
 argument-hint: "[slug]"
+disable-model-invocation: true
+allowed-tools: Bash(node:*)
 ---
 
 Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/goal-companion.mjs" status [slug]`

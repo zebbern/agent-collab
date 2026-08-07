@@ -10,6 +10,10 @@ import path from "node:path";
  * with the sibling plugins) and stays under goal-companion/, never inside the
  * codex/cursor state dirs.
  */
+// v1 creates this with default permissions (attended, machine-local telemetry).
+// If goal notes ever carry sensitive content, mirror the sibling plugins'
+// ensurePrivateDir doctrine (0o700, symlink refusal) — see
+// plugins/codex/scripts/lib/state.mjs.
 export function stateDir(cwd) {
   const root = process.env.CLAUDE_PLUGIN_DATA || os.tmpdir();
   const resolved = path.resolve(cwd);

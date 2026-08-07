@@ -84,13 +84,14 @@ async function handleStatus(argv) {
   const counts = countItems(goal);
   const inProgress = goal.backlog.find((item) => item.status === "in-progress") ?? null;
   const { entries, corruptCount } = readLedger(cwd);
+  const goalEntries = entries.filter((entry) => entry.slug === slug);
   const payload = {
     slug,
     status: goal.status,
     blockedReason: goal.blockedReason,
     counts,
     inProgress,
-    ledgerTail: entries.slice(-5),
+    ledgerTail: goalEntries.slice(-5),
     corruptLedgerLines: corruptCount
   };
   const lines = [
@@ -98,6 +99,9 @@ async function handleStatus(argv) {
     goal.statement,
     `Items: ${counts.todo} todo, ${counts["in-progress"]} in-progress, ${counts.merged} merged, ${counts.discarded} discarded, ${counts.dropped} dropped, ${counts.blocked} blocked.`,
     inProgress ? `In progress: ${inProgress.id} — ${inProgress.title}` : "Nothing in progress.",
+    ...goalEntries
+      .slice(-3)
+      .map((entry) => `-> ${entry.at} ${entry.event}${entry.disposition ? ` ${entry.disposition}` : ""} ${entry.itemId}`),
     corruptCount > 0 ? `Ledger: ${corruptCount} corrupt line(s) skipped.` : null
   ].filter((line) => line !== null);
   output(payload, `${lines.join("\n")}\n`, options.json);
@@ -277,7 +281,7 @@ async function handleCheck(argv) {
     .map((result) =>
       result.outcome === "manual"
         ? `- [manual] ${result.label}`
-        : `- [${result.outcome}] ${result.label} (exit ${result.exitCode ?? "n/a"})`
+        : `- [${result.outcome}] ${result.label} (exit ${result.exitCode ?? "n/a"}${result.detail ? ` — ${result.detail}; its processes may still be running` : ""})`
     )
     .join("\n");
   output({ slug, results, passed }, `${rendered}\n${passed ? "All command criteria pass." : "Command criteria FAILED."}\n`, options.json);
@@ -301,9 +305,12 @@ async function handleClose(argv) {
   }
   const { slug, goal } = resolveGoal(cwd, slugArg);
   if (options.done) {
+    if (goal.status === "done" || goal.status === "abandoned") {
+      throw new Error(`Goal "${slug}" is already ${goal.status}; closed goals are frozen.`);
+    }
     if (goal.status !== "active") {
       throw new Error(
-        `Cannot close as done: goal "${slug}" is ${goal.status}${goal.status === "blocked" ? ` (${goal.blockedReason})` : ""}. Resolve that first.`
+        `Cannot close as done: goal "${slug}" is ${goal.status} (${goal.blockedReason}). Resolve that first.`
       );
     }
     const blockedItems = goal.backlog.filter((item) => item.status === "blocked");
@@ -326,6 +333,9 @@ async function handleClose(argv) {
     }
     goal.status = "done";
   } else {
+    if (goal.status === "done" || goal.status === "abandoned") {
+      throw new Error(`Goal "${slug}" is already ${goal.status}; closed goals are frozen.`);
+    }
     goal.status = "abandoned";
   }
   goal.blockedReason = null;

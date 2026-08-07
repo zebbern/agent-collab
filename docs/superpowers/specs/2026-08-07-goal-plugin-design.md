@@ -131,6 +131,10 @@ This file is the raw feed for the future retrospective loop. Corrupt lines
 are skipped and *counted*; `status` reports the count — never silently
 absorbed.
 
+v1 creates the state dir with default permissions; adopting the siblings'
+private-dir hardening is the known upgrade if ledger content ever becomes
+sensitive.
+
 ## Companion command surface
 
 Conventions shared with the siblings: every subcommand accepts `--cwd`

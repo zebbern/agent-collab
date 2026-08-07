@@ -12,6 +12,33 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+const GOAL_KEYS = new Set([
+  "schemaVersion",
+  "slug",
+  "statement",
+  "acceptanceCriteria",
+  "backlog",
+  "budget",
+  "status",
+  "blockedReason",
+  "createdAt",
+  "updatedAt"
+]);
+const CRITERION_KEYS = new Set(["kind", "run", "expect", "timeoutMs", "text"]);
+const ITEM_KEYS = new Set(["id", "title", "detail", "status", "disposition", "startedAt"]);
+const DISPOSITION_KEYS = new Set(["recordedAt", "pr", "delegate", "notes"]);
+const BUDGET_KEYS = new Set(["perStepDelegations"]);
+
+// Hand-edited files must fail loudly on a typo'd key rather than silently
+// ignoring it, so unknown keys are checked at every nesting level.
+function checkUnknownKeys(object, allowedKeys, label, errors) {
+  for (const key of Object.keys(object)) {
+    if (!allowedKeys.has(key)) {
+      errors.push(`${label} has unknown key "${key}" — remove it or fix the spelling`);
+    }
+  }
+}
+
 /**
  * Validate a goal object against schemaVersion 1. Returns a list of specific
  * problems; an empty list means valid. Every refusal path in the companion
@@ -23,6 +50,7 @@ export function validateGoal(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return ["goal must be a JSON object"];
   }
+  checkUnknownKeys(value, GOAL_KEYS, "goal", errors);
   if (value.schemaVersion !== GOAL_SCHEMA_VERSION) {
     errors.push(`schemaVersion must be ${GOAL_SCHEMA_VERSION}`);
   }
@@ -41,6 +69,7 @@ export function validateGoal(value) {
         errors.push(`${label} must be an object`);
         return;
       }
+      checkUnknownKeys(criterion, CRITERION_KEYS, label, errors);
       if (criterion.kind === "command") {
         if (!isNonEmptyString(criterion.run)) errors.push(`${label}.run must be a non-empty string`);
         if (criterion.expect !== "exit0") errors.push(`${label}.expect must be "exit0"`);
@@ -68,6 +97,7 @@ export function validateGoal(value) {
         errors.push(`${label} must be an object`);
         return;
       }
+      checkUnknownKeys(item, ITEM_KEYS, label, errors);
       if (!isNonEmptyString(item.id) || !SLUG_PATTERN.test(item.id)) {
         errors.push(`${label}.id must be a non-empty [a-z0-9-]+ string`);
       } else if (seen.has(item.id)) {
@@ -83,8 +113,11 @@ export function validateGoal(value) {
       if (TERMINAL_ITEM_STATUSES.includes(item.status)) {
         if (typeof item.disposition !== "object" || item.disposition === null) {
           errors.push(`${label}.disposition must be an object recording the terminal outcome`);
-        } else if (!isNonEmptyString(item.disposition.recordedAt)) {
-          errors.push(`${label}.disposition.recordedAt must be an ISO timestamp string`);
+        } else {
+          checkUnknownKeys(item.disposition, DISPOSITION_KEYS, `${label}.disposition`, errors);
+          if (!isNonEmptyString(item.disposition.recordedAt)) {
+            errors.push(`${label}.disposition.recordedAt must be an ISO timestamp string`);
+          }
         }
       } else if (item.disposition !== null && item.disposition !== undefined) {
         errors.push(`${label}.disposition must be null until the item reaches a terminal status`);
@@ -92,6 +125,14 @@ export function validateGoal(value) {
     });
     if (inProgress > 1) {
       errors.push("at most one item may be in-progress");
+    }
+    const blockedIds = value.backlog
+      .filter((item) => typeof item === "object" && item !== null && item.status === "blocked")
+      .map((item) => item.id);
+    if (value.status === "active" && blockedIds.length > 0) {
+      errors.push(
+        `an active goal may not carry blocked item(s) (${blockedIds.join(", ")}) — resolve them (back to todo, or dropped) or keep the goal status "blocked"`
+      );
     }
   }
   if (value.budget !== undefined && value.budget !== null) {
@@ -101,6 +142,8 @@ export function validateGoal(value) {
       value.budget.perStepDelegations <= 0
     ) {
       errors.push("budget.perStepDelegations must be a positive integer");
+    } else {
+      checkUnknownKeys(value.budget, BUDGET_KEYS, "budget", errors);
     }
   }
   if (!GOAL_STATUSES.includes(value.status)) {
@@ -185,7 +228,11 @@ export function saveGoal(cwd, goal) {
   const dir = goalsDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${goal.slug}.json`);
-  const stamped = { ...goal, updatedAt: new Date().toISOString() };
+  const stamped = {
+    ...goal,
+    createdAt: goal.createdAt ?? new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(stamped, null, 2)}\n`);
   fs.renameSync(tmp, file);

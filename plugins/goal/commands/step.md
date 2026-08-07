@@ -1,6 +1,8 @@
 ---
 description: Advance the project goal by exactly one increment
 argument-hint: "[slug]"
+disable-model-invocation: true
+allowed-tools: Bash(node:*)
 ---
 
 Advance the goal one increment. One increment per invocation — when step 7

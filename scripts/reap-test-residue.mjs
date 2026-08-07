@@ -33,7 +33,8 @@ export const TEST_DIR_PREFIXES = [
   "codex-plugin-runtime-state-",
   "cursor-plugin-runtime-state-",
   "sync-chassis-test-",
-  "cxc-launcher-exit-"
+  "cxc-launcher-exit-",
+  "goal-plugin-test-"
 ];
 
 function isTestResidue(name) {
