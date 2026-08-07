@@ -117,10 +117,9 @@ Semantics:
 
 - **Dispositions in the goal file** (git-tracked): portable ground truth,
   reviewable in the PR that completes each item.
-- **`ledger.jsonl`** in the plugin state dir (`goal-companion` under the
-  same temp/plugin-data convention as the siblings — state dirs stay
-  separate per the repo rule): append-only, machine-local telemetry. One
-  line per event:
+- **`ledger.jsonl`** in the plugin state dir
+  (`~/.claude/goal-companion/<project-key>/`): append-only, machine-local
+  telemetry. One line per event:
 
 ```json
 { "at": "…", "slug": "…", "itemId": "…", "event": "step-started" }
@@ -138,6 +137,22 @@ hardening (0o700 root + non-recursive leaf creation, symlink/non-directory
 refusal, off-win32 ownership and loose-mode checks) was built goal-locally in
 `plugins/goal/scripts/lib/ledger.mjs` on 2026-08-07 — no longer a known
 upgrade, it is in place.
+
+State-root doctrine (amended 2026-08-07, after the first real install): v1
+keyed the root off ambient `CLAUDE_PLUGIN_DATA` (the siblings' convention),
+falling back to tmpdir. Installed sessions export whichever plugin's data dir
+last set that var into every Bash environment, so one project's history
+silently split across roots (9 dispositions orphaned in the tmpdir root; the
+first portfolio retro honestly floor-refused against a 1-disposition shard).
+The ledger root is now ONE canonical per-user location independent of
+invocation context — `~/.claude/goal-companion/` (override:
+`GOAL_COMPANION_STATE_ROOT`, goal-specific, test isolation only; ambient
+`CLAUDE_PLUGIN_DATA` is never consulted for root selection). Every ledger
+touch first consolidates legacy roots (the tmpdir fallback and the current
+environment's `CLAUDE_PLUGIN_DATA`, per project key) into the canonical file,
+merged by timestamp with corrupt lines preserved, leaving a `.migrated`
+marker so nothing imports twice. A root-splitting regression guard lives in
+`tests/goal-companion.test.mjs`.
 
 ## Companion command surface
 

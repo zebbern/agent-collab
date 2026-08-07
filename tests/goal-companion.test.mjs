@@ -1,6 +1,7 @@
 // Behavior tests for the goal companion and its libs. E2E tests run the real
 // CLI via node with temp-dir projects; lib tests import functions directly.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -19,8 +20,13 @@ import { appendLedger, readLedger, stateDir } from "../plugins/goal/scripts/lib/
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "goal", "scripts", "goal-companion.mjs");
 
-// Isolate goal-companion ledger state from any real plugin data on this host.
-process.env.CLAUDE_PLUGIN_DATA = makeTempDir("goal-plugin-test-state-");
+// Isolate goal-companion ledger state from any real state on this host. The
+// override is goal-specific on purpose: ambient CLAUDE_PLUGIN_DATA is real in
+// installed sessions (it carries whichever plugin's data dir last exported it)
+// and must never steer the ledger root — the tests below that set it are
+// exercising exactly that hostility, so scrub any ambient value here.
+process.env.GOAL_COMPANION_STATE_ROOT = makeTempDir("goal-plugin-test-state-");
+delete process.env.CLAUDE_PLUGIN_DATA;
 
 test("parseCommandInput handles flags, values, positionals, and the -C alias", () => {
   const { options, positionals } = parseCommandInput(
@@ -155,10 +161,10 @@ test("a hand-broken goal file refuses with specifics, never repairs", () => {
   assert.throws(() => resolveGoal(project, "test-goal"), /slug .*different.* does not match/);
 });
 
-test("ledger appends under the plugin-data override and tolerates corrupt lines", () => {
+test("ledger appends under the state-root override and tolerates corrupt lines", () => {
   const project = makeTempDir("goal-plugin-test-proj-");
   assert.ok(
-    stateDir(project).startsWith(path.join(process.env.CLAUDE_PLUGIN_DATA, "goal-companion")),
+    stateDir(project).startsWith(process.env.GOAL_COMPANION_STATE_ROOT),
     stateDir(project)
   );
 
@@ -173,6 +179,137 @@ test("ledger appends under the plugin-data override and tolerates corrupt lines"
   assert.equal(corruptCount, 1);
   assert.equal(entries[0].event, "step-started");
   assert.ok(typeof entries[0].at === "string" && entries[0].at.includes("T"));
+});
+
+// Root-splitting regression guard (the 2026-08-07 first-install fallout):
+// goal-companion invoked from different plugin contexts — codex-inline,
+// goal-inline, or a bare shell — must land in ONE state root per project, or
+// the retro's evidence fragments per invocation context.
+test("state root ignores ambient CLAUDE_PLUGIN_DATA — one root per project across invocation contexts", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const foreignData = makeTempDir("goal-plugin-test-foreign-data-");
+  const canonical = stateDir(project);
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+  try {
+    assert.equal(stateDir(project), canonical);
+    appendLedger(project, { slug: "g", itemId: "i", event: "step-started" });
+    assert.ok(fs.existsSync(path.join(canonical, "ledger.jsonl")));
+    assert.ok(!fs.existsSync(path.join(foreignData, "goal-companion")));
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("without the override, the canonical root lives under the user's home dir — never tmpdir, never plugin data", () => {
+  const savedRoot = process.env.GOAL_COMPANION_STATE_ROOT;
+  delete process.env.GOAL_COMPANION_STATE_ROOT;
+  process.env.CLAUDE_PLUGIN_DATA = makeTempDir("goal-plugin-test-foreign-data-");
+  try {
+    // Pure path computation — nothing is written to the real home dir here.
+    const dir = stateDir(makeTempDir("goal-plugin-test-proj-"));
+    assert.ok(dir.startsWith(path.join(os.homedir(), ".claude", "goal-companion")), dir);
+  } finally {
+    process.env.GOAL_COMPANION_STATE_ROOT = savedRoot;
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("readLedger consolidates a context-split ledger into the canonical root, chronologically, with a trace", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  appendLedger(project, { slug: "g", itemId: "late", event: "step-started" }); // stamped now
+
+  const foreignData = makeTempDir("goal-plugin-test-foreign-data-");
+  const strandedDir = path.join(foreignData, "goal-companion", path.basename(stateDir(project)));
+  fs.mkdirSync(strandedDir, { recursive: true });
+  const strandedFile = path.join(strandedDir, "ledger.jsonl");
+  fs.writeFileSync(
+    strandedFile,
+    [
+      JSON.stringify({ at: "2026-08-01T00:00:00.000Z", slug: "g", itemId: "early", event: "step-started" }),
+      "{torn write",
+      JSON.stringify({ at: "2026-08-01T01:00:00.000Z", slug: "g", itemId: "early", event: "disposition", disposition: "merged" }),
+      ""
+    ].join("\n")
+  );
+
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+  try {
+    const { entries, corruptCount } = readLedger(project);
+    assert.equal(corruptCount, 1); // the torn write survives consolidation, still counted
+    assert.deepEqual(
+      entries.map((entry) => entry.itemId),
+      ["early", "early", "late"]
+    );
+    assert.ok(!fs.existsSync(strandedFile));
+    assert.ok(fs.existsSync(`${strandedFile}.migrated`));
+
+    // Idempotent: a second read sees the same history, no duplicates.
+    const again = readLedger(project);
+    assert.equal(again.entries.length, 3);
+    assert.equal(again.corruptCount, 1);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("appendLedger migrates the pre-install tmpdir ledger into the canonical root", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const legacyDir = path.join(os.tmpdir(), "goal-companion", path.basename(stateDir(project)));
+  fs.mkdirSync(legacyDir, { recursive: true });
+  const legacyFile = path.join(legacyDir, "ledger.jsonl");
+  fs.writeFileSync(
+    legacyFile,
+    `${JSON.stringify({ at: "2026-08-01T00:00:00.000Z", slug: "g", itemId: "pre-install", event: "step-started" })}\n`
+  );
+  try {
+    appendLedger(project, { slug: "g", itemId: "post-fix", event: "step-started" });
+    const { entries } = readLedger(project);
+    assert.deepEqual(
+      entries.map((entry) => entry.itemId),
+      ["pre-install", "post-fix"]
+    );
+    assert.ok(!fs.existsSync(legacyFile));
+    assert.ok(fs.existsSync(`${legacyFile}.migrated`));
+  } finally {
+    fs.rmSync(legacyDir, { recursive: true, force: true });
+  }
+});
+
+test("retro-record counts dispositions across a healed context split", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const draft = path.join(makeTempDir("goal-plugin-test-draft-"), "goal.json");
+  fs.writeFileSync(draft, JSON.stringify(makeGoal()));
+  const set = companion(["set", "--file", draft], project);
+  assert.equal(set.status, 0, set.stderr);
+
+  const foreignData = makeTempDir("goal-plugin-test-foreign-data-");
+  const strandedDir = path.join(foreignData, "goal-companion", path.basename(stateDir(project)));
+  fs.mkdirSync(strandedDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(strandedDir, "ledger.jsonl"),
+    Array.from({ length: 5 }, (_, i) =>
+      `${JSON.stringify({
+        at: `2026-08-0${i + 1}T00:00:00.000Z`,
+        slug: "test-goal",
+        itemId: `item-${i}`,
+        event: "disposition",
+        disposition: "merged"
+      })}\n`
+    ).join("")
+  );
+
+  // An invocation from the poisoned context heals the split...
+  const heal = companion(["ledger", "--all", "--json"], project, { CLAUDE_PLUGIN_DATA: foreignData });
+  assert.equal(heal.status, 0, heal.stderr);
+  assert.equal(JSON.parse(heal.stdout).entries.length, 5);
+
+  // ...and a later bare-context invocation still sees the whole history:
+  // the retro floor counts all five dispositions, not a per-context shard.
+  const retro = companion(["retro-record", "--all", "--json"], project);
+  assert.equal(retro.status, 0, retro.stderr);
+  const payload = JSON.parse(retro.stdout);
+  assert.equal(payload.dispositions, 5);
+  assert.equal(payload.floorMet, true);
 });
 
 test("appendLedger refuses a pre-planted regular FILE at the leaf state-dir path", () => {
@@ -221,8 +358,10 @@ function writeGoalFixture(project, overrides = {}) {
   return goal;
 }
 
-function companion(args, project) {
-  return run(process.execPath, [SCRIPT, ...args, "--cwd", project], { env: { ...process.env } });
+function companion(args, project, envOverrides = {}) {
+  return run(process.execPath, [SCRIPT, ...args, "--cwd", project], {
+    env: { ...process.env, ...envOverrides }
+  });
 }
 
 test("set validates and writes; status reports counts and ledger health", () => {

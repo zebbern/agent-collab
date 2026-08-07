@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- One canonical ledger root, healed splits: the ledger state root no longer
+  honors ambient `CLAUDE_PLUGIN_DATA`. Installed sessions export whichever
+  plugin's data dir last set that var into every Bash environment (observed
+  2026-08-07, the day the plugins were first really installed), so a single
+  project's history silently split across roots — 9 pre-install dispositions
+  were orphaned in the tmpdir fallback and the first portfolio retro honestly
+  floor-refused against a 1-disposition shard. The root is now one stable
+  per-user location (`~/.claude/goal-companion/`;
+  `GOAL_COMPANION_STATE_ROOT` overrides it for test isolation only), and
+  every ledger touch first consolidates legacy roots (tmpdir and the current
+  environment's plugin-data dir, per project key) into the canonical file —
+  merged by timestamp, corrupt lines preserved and still counted, each
+  drained source left as a `.migrated` marker so nothing imports twice. A
+  root-splitting regression guard pins that the state dir is identical
+  across invocation contexts.
 - Retro events and evaluate-prior-adoptions: `retro-record` appends a `retro`
   ledger event (scope, disposition count, floor verdict, optional proposal PR
   and findings count), and `/goal:retro` now requires evaluating prior
