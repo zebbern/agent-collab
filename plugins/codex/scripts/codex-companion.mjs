@@ -103,6 +103,16 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
+// Named task profiles, applied to task/rescue only (v1). Grounded against
+// CLAUDE.md's live-verified model-delegation policy (codex-cli 0.146.0):
+// "deep" mirrors the Codex Sol deep-analysis default, "fast" is the same
+// target the shipped `spark` alias already maps to. codex-cli exposes no
+// model-roster command (verified live against 0.146.0: no `models`/`list`
+// subcommand), so these ids cannot be machine-checked at runtime today.
+const TASK_PROFILES = new Map([
+  ["deep", { model: "gpt-5.6-sol", effort: "xhigh" }],
+  ["fast", { model: "gpt-5.3-codex-spark" }]
+]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const MAX_TELEMETRY_ITEMS = 100;
 
@@ -123,7 +133,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs doctor [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh|max>] [--prompt-file <path>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--profile <deep|fast>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh|max>] [--prompt-file <path>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--wait] [--timeout-ms <ms>] [--poll-interval-ms <ms>] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -134,6 +144,7 @@ function printUsage() {
       "",
       "Notes:",
       "  - task also accepts the prompt from piped stdin; --model spark maps to gpt-5.3-codex-spark.",
+      "  - task --profile deep uses gpt-5.6-sol at xhigh effort; --profile fast uses gpt-5.3-codex-spark. Explicit --model/--effort override the profile; review/adversarial-review reject --profile.",
       "  - every subcommand accepts --cwd <path> (alias -C)."
     ].join("\n")
   );
@@ -176,6 +187,20 @@ function normalizeReasoningEffort(effort) {
     );
   }
   return normalized;
+}
+
+function normalizeTaskProfile(profile) {
+  if (profile === undefined) {
+    return null;
+  }
+  const normalized = String(profile).trim().toLowerCase();
+  const resolved = TASK_PROFILES.get(normalized);
+  if (!resolved) {
+    throw new Error(
+      `Unsupported task profile "${profile}". Use one of: ${[...TASK_PROFILES.keys()].join(", ")}.`
+    );
+  }
+  return resolved;
 }
 
 function normalizeArgv(argv) {
@@ -934,12 +959,21 @@ export function enqueueBackgroundTask(cwd, job, request, dependencies = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "cwd", "profile"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
     }
   });
+
+  // Profiles apply to task/rescue only (v1). --profile is parsed as a value
+  // option here (not left permissive) specifically so it is rejected
+  // explicitly instead of being swallowed into adversarial-review focus text.
+  if (options.profile !== undefined) {
+    throw new Error(
+      "`--profile` is not supported by review or adversarial-review. Profiles are supported only by `/codex:task` and `/codex:rescue`."
+    );
+  }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -984,7 +1018,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "profile"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
@@ -993,8 +1027,15 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
-  const effort = normalizeReasoningEffort(options.effort);
+  // Resolution order (once, before the foreground/background branch):
+  // --profile supplies defaults; explicit --model overrides the profile
+  // model; explicit --effort overrides the profile effort; no profile and no
+  // flags preserves today's null / CLI-default behavior exactly.
+  const profileDefaults = normalizeTaskProfile(options.profile);
+  const explicitModel = normalizeRequestedModel(options.model);
+  const explicitEffort = normalizeReasoningEffort(options.effort);
+  const model = explicitModel ?? profileDefaults?.model ?? null;
+  const effort = explicitEffort ?? profileDefaults?.effort ?? null;
   const prompt = readTaskPrompt(cwd, options, positionals);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);

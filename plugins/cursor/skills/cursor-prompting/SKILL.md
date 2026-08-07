@@ -19,6 +19,7 @@ Prompt shape:
 - Do not paste large file contents into the prompt — Cursor reads the workspace itself.
 
 Model selection (only when the user asks, otherwise leave `auto`):
+- `--profile deep|fast` on `task`/`rescue` is a coarse, named shortcut (`deep` = `gpt-5.6-sol-xhigh`, `fast` = `cursor-grok-4.5-high-fast`) with no effort tier — Cursor has none. `--model` still overrides it and remains the explicit-model escape hatch.
 - `auto` — Cursor's server-side router; the right default for most tasks.
 - Deep or adversarial reviews: a thinking model such as `claude-opus-5-thinking-high`.
 - Quick, tightly bounded edits: a fast Codex tier such as `gpt-5.3-codex-fast` or `gpt-5.3-codex-low-fast`.

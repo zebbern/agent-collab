@@ -24,6 +24,30 @@ test("cursor rescue command routes through the Agent tool without Skill recursio
   assert.match(rescue, /there is no resume-last shortcut/i);
 });
 
+test("cursor task and rescue argument hints advertise --profile", () => {
+  const task = read("commands/task.md");
+  const rescue = read("commands/rescue.md");
+  assert.match(task, /argument-hint:.*--profile deep\|fast/);
+  assert.match(rescue, /argument-hint:.*--profile deep\|fast/);
+  assert.match(task, /An explicit `--model` overrides the profile's model/i);
+  assert.match(task, /There is no `--effort` flag/);
+});
+
+test("cursor help advertises profiles on task only", () => {
+  const companion = read("scripts/cursor-companion.mjs");
+  const taskLine = companion.split("\n").find((line) => /companion\.mjs task \[/.test(line));
+  assert.ok(taskLine, "expected a task usage line in printUsage()");
+  assert.match(taskLine, /--profile <deep\|fast>/);
+
+  const reviewLines = companion
+    .split("\n")
+    .filter((line) => /companion\.mjs (adversarial-)?review \[/.test(line));
+  assert.ok(reviewLines.length >= 2, "expected review and adversarial-review usage lines");
+  for (const line of reviewLines) {
+    assert.doesNotMatch(line, /--profile/);
+  }
+});
+
 test("cursor rescue agent is a thin forwarder with the right skills", () => {
   const agent = read("agents/cursor-rescue.md");
   assert.match(agent, /^name: cursor-rescue$/m);
@@ -32,6 +56,11 @@ test("cursor rescue agent is a thin forwarder with the right skills", () => {
   assert.match(agent, /cursor-prompting/);
   assert.match(agent, /Return the stdout of the `cursor-companion` command exactly as-is/i);
   assert.doesNotMatch(agent, /--effort <|--resume-last/);
+  // --profile is a runtime control, passed through and stripped from the
+  // forwarded task text, mirroring the existing --model handling.
+  assert.match(agent, /--profile <name>.*runtime controls|runtime controls[\s\S]*--profile <name>/);
+  assert.match(agent, /pass \`--profile <name>\` through to \`task\` unchanged and strip it from the task text/i);
+  assert.match(agent, /There is no `--effort` flag/);
 });
 
 test("cursor runtime skill keeps the forwarder contract", () => {
@@ -42,6 +71,9 @@ test("cursor runtime skill keeps the forwarder contract", () => {
   assert.match(runtime, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/);
   assert.match(runtime, /Return the stdout of the `task` command exactly as-is/i);
   assert.match(runtime, /There is no `--effort` flag/);
+  // --profile is a runtime control passed through to `task` and stripped
+  // from the task text, mirroring the existing --model handling.
+  assert.match(runtime, /includes `--profile <deep\|fast>`, pass it through to `task` and strip it from the task text/i);
 });
 
 test("cursor result-handling skill forbids auto-applying review fixes", () => {
@@ -59,7 +91,7 @@ test("cursor delegation skill drives ambient delegation with disclosure and the 
   // The description must trigger on task shape, not on a command name.
   assert.match(delegation, /Use when a coding task would benefit from delegating work to Cursor in the background/);
   assert.match(delegation, /without the user typing \/cursor:\* commands/);
-  assert.match(delegation, /task --background \[--write\] \[--model <model>\] "<prompt>"/);
+  assert.match(delegation, /task --background \[--write\] \[--profile deep\|fast\] \[--model <model>\] "<prompt>"/);
   assert.match(delegation, /started in the background as <jobId>/);
   assert.match(delegation, /status <jobId> --wait --timeout-ms 1800000 --json/);
   assert.match(delegation, /run_in_background:\s*true/);

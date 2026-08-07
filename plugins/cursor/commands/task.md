@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, a fix request, or follow-up work to the Cursor CLI
-argument-hint: "[--background|--wait] [--write] [--model <model>] [--resume <chat-id>] [what Cursor should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--write] [--profile deep|fast] [--model <model>] [--resume <chat-id>] [what Cursor should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -29,7 +29,8 @@ Operating rules:
 
 - `--background` and `--wait` are execution flags for Claude Code. The companion script accepts `--background` for job bookkeeping, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - `--write` adds `--force` (skips per-command confirmation). Cursor has **no enforced read-only sandbox** under `--trust`, so a task can modify files even without `--write`, and tasks get no workspace-drift check — `--write` only removes the confirmation step. Only add `--write` when the user clearly asked for changes to be made.
-- `--model` is a runtime-selection flag. Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text. Leave the model unset unless the user explicitly asks for one.
+- `--profile deep|fast` selects a named task profile (`deep` = `gpt-5.6-sol-xhigh`, `fast` = `cursor-grok-4.5-high-fast`). Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text. An explicit `--model` overrides the profile's model. There is no `--effort` flag — Cursor profiles carry a model choice only.
+- `--model` is a runtime-selection flag. Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text. Leave the model unset unless the user explicitly asks for one or a profile is given.
 - `--resume <chat-id>` continues an existing Cursor chat. Preserve it verbatim.
 - Return the companion stdout verbatim to the user. Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - If the command reports that cursor-agent is missing or unauthenticated, stop and tell the user to run `/cursor:setup`.

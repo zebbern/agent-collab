@@ -748,6 +748,39 @@ test("adversarial review rejects staged-only scope to match review target select
   assert.match(result.stderr, /Use one of: auto, working-tree, branch, or pass --base <ref>/i);
 });
 
+// Profiles are supported only by task/rescue in v1. Without an explicit
+// rejection, the permissive positional-argument parser would otherwise
+// swallow "--profile deep" as adversarial-review focus text.
+for (const subcommand of ["review", "adversarial-review"]) {
+  test(`${subcommand} rejects task-only --profile before starting Codex`, () => {
+    const repo = makeTempDir();
+    const binDir = makeTempDir();
+    const statePath = path.join(binDir, "fake-codex-state.json");
+    installFakeCodex(binDir);
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+    const result = run("node", [SCRIPT, subcommand, "--profile", "deep"], {
+      cwd: repo,
+      env: buildEnv(binDir)
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      // Both plugins word this rule identically apart from their own command
+      // names — a user switching plugins must not meet two phrasings of one rule.
+      /--profile.*not supported by review or adversarial-review.*only.*\/codex:task.*\/codex:rescue/is
+    );
+    // No app-server child was ever spawned: the fake codex fixture only
+    // writes its state file once the process boots.
+    assert.equal(fs.existsSync(statePath), false);
+  });
+}
+
 test("review accepts --background while still running as a tracked review job", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

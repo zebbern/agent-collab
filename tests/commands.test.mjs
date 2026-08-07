@@ -105,9 +105,16 @@ test("companion help and --help document every subcommand and the real flags", (
     assert.match(result.stdout, /\breview \[--wait\|--background\] \[--base <ref>\] \[--scope <auto\|working-tree\|branch>\] \[--model <model>\] \[--json\]/);
     assert.match(result.stdout, /\badversarial-review .* \[focus text\]/);
     assert.match(result.stdout, /\btask .*--resume-last\|--resume\|--fresh/);
+    assert.match(result.stdout, /\btask .*--profile <deep\|fast>/);
     assert.match(result.stdout, /\btask .*--model <model\|spark>/);
     assert.match(result.stdout, /\btask .*--effort <none\|minimal\|low\|medium\|high\|xhigh\|max>/);
     assert.match(result.stdout, /\btask .*--prompt-file <path>/);
+    // Profiles are task/rescue only: the review usage line must not advertise --profile.
+    const reviewUsageLine = result.stdout
+      .split("\n")
+      .find((line) => /\breview \[--wait\|--background\]/.test(line));
+    assert.ok(reviewUsageLine, "expected a review usage line");
+    assert.doesNotMatch(reviewUsageLine, /--profile/);
     assert.match(result.stdout, /\bstatus \[job-id\] \[--wait\] \[--timeout-ms <ms>\] \[--poll-interval-ms <ms>\] \[--all\] \[--json\]/);
     assert.match(result.stdout, /\bresult \[job-id\] \[--json\]/);
     assert.match(result.stdout, /\bcancel \[job-id\] \[--json\]/);
@@ -136,6 +143,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.doesNotMatch(rescue, /^context:\s*fork\b/m);
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
+  assert.match(rescue, /--profile <deep\|fast>/);
   assert.match(rescue, /--model <model\|spark>/);
   assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh\|max>/);
   assert.match(rescue, /task-resume-candidate --json/);
@@ -148,6 +156,9 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
   assert.match(rescue, /If they ask for `spark`, map it to `gpt-5\.3-codex-spark`/i);
+  assert.match(rescue, /`--profile <deep\|fast>` is also a runtime-selection flag/i);
+  assert.match(rescue, /Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text/i);
+  assert.match(rescue, /an explicit `--model` or `--effort` on the same request overrides the profile's default for that field/i);
   assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
   assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
   assert.match(rescue, /If the user chooses continue, add `--resume`/i);
@@ -169,6 +180,8 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /Leave model unset by default/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
+  assert.match(agent, /Leave `--profile` unset by default/i);
+  assert.match(agent, /Only add `--profile <deep\|fast>` when the user explicitly asks for that named profile/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
   assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
   assert.match(agent, /gpt-5-4-prompting/);
@@ -184,12 +197,20 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
   assert.match(runtimeSkill, /Strip it before calling `task`/i);
   assert.match(runtimeSkill, /`--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`/i);
+  assert.match(runtimeSkill, /`--profile`: accepted values are `deep`, `fast`\. Only supported on `task`; `review` and `adversarial-review` reject it/i);
+  assert.match(runtimeSkill, /If the forwarded request includes `--profile <deep\|fast>`, strip it from the task text and pass it through to `task` unchanged/i);
   assert.match(runtimeSkill, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(runtimeSkill, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
   assert.match(readme, /`codex:codex-rescue` subagent/i);
   assert.match(readme, /if you do not pass `--model` or `--effort`, Codex chooses its own defaults/i);
   assert.match(readme, /--model gpt-5\.4-mini --effort medium/i);
   assert.match(readme, /`spark`, the plugin maps that to `gpt-5\.3-codex-spark`/i);
+  assert.match(readme, /--profile <deep\|fast>/);
+  assert.match(readme, /\| `deep` \| `gpt-5\.6-sol` \| `xhigh` \|/);
+  assert.match(readme, /\| `fast` \| `gpt-5\.3-codex-spark`.*\| unset \(Codex's default\) \|/);
+  assert.match(readme, /`--profile` supplies the defaults; an explicit `--model` on the same invocation overrides the profile's model, and an explicit `--effort` overrides the profile's effort/i);
+  assert.match(readme, /No `--profile` and no explicit flags behaves exactly as before: Codex's own defaults apply/i);
+  assert.match(readme, /`review` and `adversarial-review` reject `--profile`/i);
   assert.match(readme, /continue a previous Codex task/i);
   assert.match(readme, /### `\/codex:setup`/);
   assert.match(readme, /### `\/codex:review`/);
@@ -243,7 +264,8 @@ test("codex delegation skill drives ambient delegation with disclosure and the w
   // The description must trigger on task shape, not on a command name.
   assert.match(delegation, /Use when a coding task would benefit from delegating work to Codex in the background/);
   assert.match(delegation, /without the user typing \/codex:\* commands/);
-  assert.match(delegation, /task --background \[--write\] \[--effort <tier>\] "<prompt>"/);
+  assert.match(delegation, /task --background \[--write\] \[--profile <deep\|fast>\] \[--effort <tier>\] "<prompt>"/);
+  assert.match(delegation, /`--profile <deep\|fast>` is accepted on `task` \(and its `rescue` forwarder\) only; `review` and `adversarial-review` reject it/i);
   assert.match(delegation, /started in the background as <jobId>/);
   assert.match(delegation, /status <jobId> --wait --timeout-ms 1800000 --json/);
   assert.match(delegation, /run_in_background:\s*true/);

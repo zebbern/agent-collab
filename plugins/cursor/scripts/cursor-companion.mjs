@@ -93,6 +93,38 @@ const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const MAX_TELEMETRY_ITEMS = 100;
 
+// Cursor has no effort concept, so a profile carries only a model choice.
+// Both ids were live-verified against `cursor-agent --list-models` on
+// 2026-08-07 — do not substitute without re-verifying against the real CLI.
+const TASK_PROFILES = {
+  deep: { model: "gpt-5.6-sol-xhigh" },
+  fast: { model: "cursor-grok-4.5-high-fast" }
+};
+const TASK_PROFILE_NAMES = Object.keys(TASK_PROFILES);
+
+// Only task/rescue accept --profile. Resolve it once, up front: an unknown or
+// empty explicitly-supplied value must fail loudly before any cursor-agent
+// invocation or background enqueue rather than silently falling back to no
+// profile.
+function resolveTaskProfile(profileOption) {
+  if (profileOption === undefined) {
+    return null;
+  }
+  const key = String(profileOption).trim();
+  if (!key || !Object.prototype.hasOwnProperty.call(TASK_PROFILES, key)) {
+    throw new Error(`Unsupported task profile "${profileOption}". Use one of: ${TASK_PROFILE_NAMES.join(", ")}.`);
+  }
+  return TASK_PROFILES[key];
+}
+
+function rejectReviewProfile(options) {
+  if (options.profile !== undefined) {
+    throw new Error(
+      "`--profile` is not supported by review or adversarial-review. Profiles are supported only by `/cursor:task` and `/cursor:rescue`."
+    );
+  }
+}
+
 export function boundTelemetryItems(items) {
   const list = Array.isArray(items) ? items : [];
   if (list.length <= MAX_TELEMETRY_ITEMS) {
@@ -110,7 +142,7 @@ function printUsage() {
       "  node scripts/cursor-companion.mjs doctor [--json]",
       "  node scripts/cursor-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json]",
       "  node scripts/cursor-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--json] [focus text]",
-      "  node scripts/cursor-companion.mjs task [--background] [--write] [--model <model>] [--resume <chat-id>] [--prompt-file <path>] [prompt]",
+      "  node scripts/cursor-companion.mjs task [--background] [--write] [--profile <deep|fast>] [--model <model>] [--resume <chat-id>] [--prompt-file <path>] [prompt]",
       "  node scripts/cursor-companion.mjs status [job-id] [--wait] [--timeout-ms <ms>] [--poll-interval-ms <ms>] [--all] [--json]",
       "  node scripts/cursor-companion.mjs result [job-id] [--json]",
       "  node scripts/cursor-companion.mjs cancel [job-id] [--json]",
@@ -744,12 +776,14 @@ export function enqueueBackgroundTask(cwd, job, request, dependencies = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "cwd", "profile"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
     }
   });
+
+  rejectReviewProfile(options);
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -790,16 +824,22 @@ async function handleReviewCommand(argv, config) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "cwd", "prompt-file", "resume"],
+    valueOptions: ["model", "cwd", "prompt-file", "resume", "profile"],
     booleanOptions: ["json", "write", "background"],
     aliasMap: {
       m: "model"
     }
   });
 
+  // Resolve --profile before anything else: an unknown/empty explicit value
+  // must fail loudly before any cursor-agent invocation or background
+  // enqueue, never fall back silently.
+  const profile = resolveTaskProfile(options.profile);
+
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
+  const explicitModel = normalizeRequestedModel(options.model);
+  const model = explicitModel ?? (profile ? profile.model : null);
   const prompt = readTaskPrompt(cwd, options, positionals);
   const resumeChatId = typeof options.resume === "string" && options.resume.trim() ? options.resume.trim() : null;
   const write = Boolean(options.write);

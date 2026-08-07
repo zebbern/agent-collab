@@ -537,6 +537,140 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   assert.equal(fakeState.lastTurnStart.effort, "low");
 });
 
+test("task --profile deep resolves to gpt-5.6-sol at xhigh effort", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--profile", "deep", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.6-sol");
+  assert.equal(fakeState.lastTurnStart.effort, "xhigh");
+});
+
+test("task --profile fast resolves to gpt-5.3-codex-spark and leaves effort unset", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--profile", "fast", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
+  assert.equal(fakeState.lastTurnStart.effort, null);
+});
+
+test("task explicit --model and --effort override the profile defaults", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run(
+    "node",
+    [SCRIPT, "task", "--profile", "deep", "--model", "gpt-5.4-mini", "--effort", "low", "diagnose the failing test"],
+    {
+      cwd: repo,
+      env: buildEnv(binDir)
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.4-mini");
+  assert.equal(fakeState.lastTurnStart.effort, "low");
+});
+
+test("task --profile deep --model spark still expands the spark alias", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--profile", "deep", "--model", "spark", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
+  assert.equal(fakeState.lastTurnStart.effort, "xhigh");
+});
+
+test("task rejects an unknown profile before invoking Codex", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--profile", "medium", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsupported task profile "medium"\. Use one of: deep, fast\./);
+  // No app-server child was ever spawned: the fake codex fixture only writes
+  // its state file once the process boots.
+  assert.equal(fs.existsSync(statePath), false);
+});
+
+test("task rejects an invalid explicit effort even when a profile supplies a valid effort", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run(
+    "node",
+    [SCRIPT, "task", "--profile", "deep", "--effort", "nonsense", "diagnose the failing test"],
+    {
+      cwd: repo,
+      env: buildEnv(binDir)
+    }
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsupported reasoning effort "nonsense"/);
+  assert.equal(fs.existsSync(statePath), false);
+});
+
 test("task logs reasoning summaries and assistant messages to the job log", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -719,10 +853,14 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the failing test"], {
-    cwd: repo,
-    env: buildEnv(binDir)
-  });
+  const launched = run(
+    "node",
+    [SCRIPT, "task", "--background", "--profile", "deep", "--json", "investigate the failing test"],
+    {
+      cwd: repo,
+      env: buildEnv(binDir)
+    }
+  );
 
   assert.equal(launched.status, 0, launched.stderr);
   const launchPayload = JSON.parse(launched.stdout);
@@ -759,6 +897,10 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(resultPayload.job.id, launchPayload.jobId);
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+  // The resolved profile defaults (not raw "deep") must survive the
+  // background enqueue -> worker -> stored result round trip.
+  assert.equal(resultPayload.storedJob.result.model, "gpt-5.6-sol");
+  assert.equal(resultPayload.storedJob.result.effort, "xhigh");
 });
 
 test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {

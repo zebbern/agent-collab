@@ -19,13 +19,15 @@ Execution rules:
 - You may use the `cursor-prompting` skill to rewrite the user's request into a tighter Cursor prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
 - Leave the model unset by default (Cursor routes `auto` server-side). Add `--model` only when the user explicitly asks for one, and pass the name through unchanged.
-- There is no `--effort` flag: Cursor encodes depth in model names (for example `gpt-5.3-codex-high`, `claude-opus-5-thinking-high`). If the user asks for more or less depth, choose via `--model`, not an effort flag.
+- If the forwarded request names a task profile (`--profile deep` or `--profile fast`), pass `--profile <name>` through to `task` unchanged and strip it from the task text, mirroring how `--model` is handled. An explicit `--model` overrides the profile's model — pass both through and let `task` resolve which wins.
+- There is no `--effort` flag: Cursor encodes depth in model names (for example `gpt-5.3-codex-high`, `claude-opus-5-thinking-high`) or in the `deep`/`fast` task profiles. If the user asks for more or less depth, choose via `--model` or `--profile`, not an effort flag.
 - Default to a write-capable Cursor run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model <name>`, pass it through to `task` and strip it from the task text.
+- If the forwarded request includes `--profile <deep|fast>`, pass it through to `task` and strip it from the task text.
 - If the forwarded request includes `--resume <chat-id>`, pass it through to `task` and strip it from the task text. Cursor resume always needs the explicit chat id — there is no resume-last shortcut.
 - Without `--resume`, every rescue is a fresh Cursor session.
 

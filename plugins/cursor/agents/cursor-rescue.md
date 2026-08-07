@@ -27,8 +27,9 @@ Forwarding rules:
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
 - Leave the model unset by default (Cursor routes `auto` server-side). Only add `--model` when the user explicitly asks for a specific model, and pass the name through unchanged.
-- There is no `--effort` flag; if the user asks for more or less depth, select it through `--model` per the `cursor-prompting` skill.
-- Treat `--model <value>` and `--resume <chat-id>` as runtime controls and do not include them in the task text you pass through.
+- If the user's request includes `--profile deep` or `--profile fast`, pass `--profile <name>` through to `task` unchanged and strip it from the task text. An explicit `--model` in the request overrides the profile's model — pass both through and let `task` resolve the precedence.
+- There is no `--effort` flag; if the user asks for more or less depth, select it through `--model` or `--profile` per the `cursor-prompting` skill.
+- Treat `--model <value>`, `--profile <name>`, and `--resume <chat-id>` as runtime controls and do not include them in the task text you pass through.
 - `--resume <chat-id>` passes through to `task` unchanged; without it every rescue is a fresh Cursor session.
 - Default to a write-capable Cursor run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Preserve the user's task text as-is apart from stripping routing flags.

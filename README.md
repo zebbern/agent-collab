@@ -91,7 +91,7 @@ A first run that shows the whole loop:
 | --- | --- |
 | `/codex:review` | Read-only review of your working tree or branch (`--base <ref>`, `--background`) |
 | `/codex:adversarial-review` | Steerable challenge review — takes focus text, questions design decisions |
-| `/codex:rescue` | Hand a task to Codex (`--model`, `--effort`, `--resume`, `--background`) |
+| `/codex:rescue` | Hand a task to Codex (`--profile <deep|fast>`, `--model`, `--effort`, `--resume`, `--background`) |
 | `/codex:transfer` | Turn the current Claude session into a resumable Codex thread |
 | `/codex:status` / `/codex:result` / `/codex:cancel` | Track, read, and stop background jobs |
 | `/codex:setup` | Readiness check, install help, and the optional review gate |
@@ -129,6 +129,8 @@ Delegates investigation or fixes through the `codex:codex-rescue` subagent — i
 /codex:rescue --resume apply the top fix from the last run
 /codex:rescue --model spark fix the issue quickly
 /codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky test
+/codex:rescue --profile deep audit the retry logic for correctness
+/codex:rescue --profile fast rename this variable everywhere
 ```
 
 You can also just ask: *"Ask Codex to redesign the database connection to be more resilient."*
@@ -138,6 +140,17 @@ You can also just ask: *"Ask Codex to redesign the database connection to be mor
 - if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
 - if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
 - follow-up rescue requests can continue the latest Codex task in the repo
+
+#### `--profile` (task/rescue only)
+
+`--profile <deep|fast>` sets a named default for `--model` and `--effort` together, on `task` (and `rescue`, which forwards to `task`) only — `review` and `adversarial-review` reject `--profile`:
+
+| Profile | Model | Effort |
+| --- | --- | --- |
+| `deep` | `gpt-5.6-sol` | `xhigh` |
+| `fast` | `gpt-5.3-codex-spark` (same target as `--model spark`) | unset (Codex's default) |
+
+Precedence: `--profile` supplies the defaults; an explicit `--model` on the same invocation overrides the profile's model, and an explicit `--effort` overrides the profile's effort — independently, so `--profile deep --model gpt-5.4-mini` keeps the `deep` profile's `xhigh` effort with a different model. No `--profile` and no explicit flags behaves exactly as before: Codex's own defaults apply.
 
 #### `/codex:transfer`
 
