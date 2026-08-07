@@ -19,8 +19,14 @@
       "id": "state-lock-eperm-fallback",
       "title": "Make the state lock's warn-and-proceed path crash-safe on Windows rename contention",
       "detail": "Observed 2026-08-07 in a full-suite run: two workers hit the 5000ms lock timeout, both proceeded unlocked, and their concurrent state.json renames collided — EPERM from fs.renameSync crashed the worker (tests/state.test.mjs 'concurrent state updates are serialized by the state lock'). The warn-and-proceed escape hatch exists for availability, so its unlocked write must tolerate rename contention (bounded retry with jitter on EPERM/EACCES, then a loud failure) instead of throwing on first collision. Chassis change: state.mjs in BOTH plugins (literal-swap mirror via npm run sync-chassis); extend the contention test to pin the no-crash contract on the escape-hatch path.",
-      "status": "todo",
-      "disposition": null
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-07T02:52:40.496Z",
+        "pr": 14,
+        "delegate": "codex",
+        "notes": "Bounded rename-contention retry in the atomic write; Codex analysis delegated (first run likely-dead, cancelled; refined re-delegation returned approve-with-corrections, applied)"
+      },
+      "startedAt": "2026-08-07T02:08:21.585Z"
     }
   ],
   "budget": {
@@ -29,5 +35,5 @@
   "status": "active",
   "blockedReason": null,
   "createdAt": "2026-08-07T02:07:41.247Z",
-  "updatedAt": "2026-08-07T02:07:41.247Z"
+  "updatedAt": "2026-08-07T02:52:40.496Z"
 }
