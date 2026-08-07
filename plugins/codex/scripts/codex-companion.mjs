@@ -112,9 +112,14 @@ const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 // target the shipped `spark` alias already maps to. codex-cli exposes no
 // model-roster command (verified live against 0.146.0: no `models`/`list`
 // subcommand), so these ids cannot be machine-checked at runtime today.
+// Profiles are FULLY specified (model + effort): an unset effort falls
+// through to the user's ~/.codex model_reasoning_effort default, and a
+// default above xhigh (ultra/max) is rejected by the spark model with an
+// API 400 — "Supported values are: 'low', 'medium', 'high', and 'xhigh'"
+// (observed live 2026-08-08). An explicit --effort still overrides.
 const TASK_PROFILES = new Map([
   ["deep", { model: "gpt-5.6-sol", effort: "xhigh" }],
-  ["fast", { model: "gpt-5.3-codex-spark" }]
+  ["fast", { model: "gpt-5.3-codex-spark", effort: "medium" }]
 ]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const MAX_TELEMETRY_ITEMS = 100;
