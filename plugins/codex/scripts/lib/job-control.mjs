@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { getLiveProcessPids } from "./process.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, listLegacyStateShards, readJobFile, resolveJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -428,6 +428,21 @@ function matchJobReference(jobs, reference, predicate = () => true, options = {}
   throw new Error(`No job found for "${reference}". Run /codex:status to list known jobs.`);
 }
 
+// A reference that misses may be a job stranded under a pre-canonical state
+// root (ambient CLAUDE_PLUGIN_DATA split) — say where to look instead of
+// leaving the user staring at a bare "No job found".
+function legacyResidueHint(workspaceRoot) {
+  try {
+    const shards = listLegacyStateShards(workspaceRoot);
+    if (shards.length > 0) {
+      return ` Note: an older plugin version left job state under ${shards[0]}; run /codex:doctor for details.`;
+    }
+  } catch {
+    // The hint must never mask the primary error.
+  }
+  return "";
+}
+
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
@@ -462,7 +477,7 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const selected = matchJobReference(jobs, reference, undefined, { allowMissing: true });
   if (!selected) {
-    throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
+    throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.${legacyResidueHint(workspaceRoot)}`);
   }
 
   const livePids = getLiveJobPids([selected], options);
@@ -510,7 +525,7 @@ export function resolveResultJob(cwd, reference) {
   }
 
   if (reference) {
-    throw new Error(`No finished job found for "${reference}". Run /codex:status to inspect active jobs.`);
+    throw new Error(`No finished job found for "${reference}". Run /codex:status to inspect active jobs.${legacyResidueHint(workspaceRoot)}`);
   }
 
   throw new Error("No finished Codex jobs found for this repository yet.");
@@ -533,7 +548,7 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     if (known) {
       throw new Error(`Job ${known.id} is already ${known.status}; there is nothing to cancel.`);
     }
-    throw new Error(`No active job found for "${reference}".`);
+    throw new Error(`No active job found for "${reference}".${legacyResidueHint(workspaceRoot)}`);
   }
 
   const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);

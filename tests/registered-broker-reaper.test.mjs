@@ -85,7 +85,7 @@ function snapshot(pid, minute) {
 function makeFixture(t, { child = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "registered-broker-reaper-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = { CLAUDE_PLUGIN_DATA: root };
+  const env = { CODEX_COMPANION_STATE_ROOT: root };
   const brokerSnapshot = snapshot(4100, 1);
   const registration = publishBrokerRegistration({
     cwd: root,
@@ -334,8 +334,8 @@ test("malformed owner or child state is report-only", async (t) => {
 test("missing and unregistered broker rows never reach a signal path", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "registered-broker-reaper-missing-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = { CLAUDE_PLUGIN_DATA: root };
-  const registryRoot = path.join(root, "state", "broker-ownership-v1");
+  const env = { CODEX_COMPANION_STATE_ROOT: root };
+  const registryRoot = path.join(root, "broker-ownership-v1");
   const missingBrokerDir = path.join(registryRoot, "a".repeat(64));
   fs.mkdirSync(missingBrokerDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(registryRoot, 0o700);
@@ -353,7 +353,7 @@ test("missing and unregistered broker rows never reach a signal path", async (t)
   t.after(() => fs.rmSync(emptyRoot, { recursive: true, force: true }));
   const empty = await runRegisteredBrokerReaper({
     mode: "apply-registered",
-    env: { CLAUDE_PLUGIN_DATA: emptyRoot }
+    env: { CODEX_COMPANION_STATE_ROOT: emptyRoot }
   });
   assert.equal(empty.scanned, 0);
 });

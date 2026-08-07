@@ -9,8 +9,10 @@ import { spawn } from "node:child_process";
 import { makeTempDir } from "./helpers.mjs";
 import {
   appendStartupMetric,
+  consolidateLegacyState,
   ensureStateDir,
   listJobs,
+  listLegacyStateShards,
   loadState,
   readStartupMetrics,
   resolveMetricsFile,
@@ -20,6 +22,8 @@ import {
   resolveStateDir,
   resolveStateFile,
   saveState,
+  setConfig,
+  summarizeLegacyStateShards,
   updateState,
   upsertJob,
   writeCancelFlag,
@@ -28,41 +32,209 @@ import {
 import { createJobLogFile } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 // Single-file runs (node --test tests/<f>) bypass scripts/run-tests.mjs's
-// env scrub, so shed any ambient installed-plugin data dir here too: these
-// tests assert the tmpdir fallback and per-workspace isolation, which a
-// harness-provided CLAUDE_PLUGIN_DATA (both plugins share the var) breaks.
+// env scrub, so shed any ambient installed-plugin data dir here too. The
+// canonical state root is per-user; the suite isolates by pointing the
+// override at a temp dir (the same convention the goal suite uses for
+// GOAL_COMPANION_STATE_ROOT).
 delete process.env.CLAUDE_PLUGIN_DATA;
+const suiteStateRoot = makeTempDir("codex-plugin-state-root-");
+process.env.CODEX_COMPANION_STATE_ROOT = suiteStateRoot;
 
-test("resolveStateDir uses a temp-backed per-workspace directory", () => {
+// Shape a legacy shard the way the pre-canonical versions laid state out:
+// <plugin data dir>/state/<workspace-key>/. The workspace key is derived from
+// the workspace path alone, so the canonical resolver's basename is the same
+// key every root uses.
+function writeLegacyShard(pluginDataDir, workspace, { metrics = [], state = null } = {}) {
+  const shard = path.join(pluginDataDir, "state", path.basename(resolveStateDir(workspace)));
+  fs.mkdirSync(shard, { recursive: true });
+  if (metrics.length > 0) {
+    fs.writeFileSync(
+      path.join(shard, "metrics.jsonl"),
+      `${metrics.map((row) => JSON.stringify(row)).join("\n")}\n`,
+      "utf8"
+    );
+  }
+  if (state) {
+    fs.writeFileSync(path.join(shard, "state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  }
+  return shard;
+}
+
+test("resolveStateDir puts each workspace under the canonical state root", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
 
-  assert.equal(stateDir.startsWith(os.tmpdir()), true);
+  assert.equal(stateDir.startsWith(suiteStateRoot), true);
   assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
-  assert.match(stateDir, new RegExp(`^${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
-test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
+test("resolveStateDir ignores ambient CLAUDE_PLUGIN_DATA — one root per workspace across invocation contexts", () => {
   const workspace = makeTempDir();
-  const pluginDataDir = makeTempDir();
-  const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
-  process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  const foreignData = makeTempDir();
+  const canonical = resolveStateDir(workspace);
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
 
   try {
-    const stateDir = resolveStateDir(workspace);
-
-    assert.equal(stateDir.startsWith(path.join(pluginDataDir, "state")), true);
-    assert.match(path.basename(stateDir), /.+-[a-f0-9]{16}$/);
-    assert.match(
-      stateDir,
-      new RegExp(`^${path.join(pluginDataDir, "state").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
-    );
+    assert.equal(resolveStateDir(workspace), canonical);
+    ensureStateDir(workspace);
+    assert.equal(fs.existsSync(canonical), true);
+    // The ambient dir must never even be created, let alone written to.
+    assert.equal(fs.existsSync(path.join(foreignData, "state")), false);
   } finally {
-    if (previousPluginDataDir == null) {
-      delete process.env.CLAUDE_PLUGIN_DATA;
-    } else {
-      process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("without the override, the canonical root lives under the user's home dir — never tmpdir, never plugin data", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  delete process.env.CODEX_COMPANION_STATE_ROOT;
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+
+  try {
+    // Pure path computation — nothing is created under the real home dir.
+    const stateDir = resolveStateDir(workspace);
+    assert.equal(stateDir.startsWith(path.join(os.homedir(), ".claude", "codex-companion")), true);
+  } finally {
+    process.env.CODEX_COMPANION_STATE_ROOT = suiteStateRoot;
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("consolidateLegacyState imports only this plugin's metrics rows from an ambient legacy shard, once", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  const shard = writeLegacyShard(foreignData, workspace, {
+    metrics: [
+      { at: "2026-08-01T00:00:00.000Z", kind: "startup", plugin: "codex", transport: "direct", ms: 11 },
+      { at: "2026-08-02T00:00:00.000Z", kind: "startup", plugin: "cursor", transport: "wsl", ms: 22 },
+      { at: "2026-08-03T00:00:00.000Z", kind: "startup", transport: "direct", ms: 33 }
+    ]
+  });
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+
+  try {
+    const summary = consolidateLegacyState(workspace);
+    assert.equal(summary.importedMetrics, 1);
+    // Only the codex-stamped row crosses; the sibling plugin's row and the
+    // unattributable row stay behind for their own owners.
+    assert.deepEqual(readStartupMetrics(workspace).map((m) => m.ms), [11]);
+    assert.equal(fs.existsSync(path.join(shard, "metrics.jsonl.migrated-codex")), true);
+    assert.equal(fs.existsSync(path.join(shard, "metrics.jsonl")), true);
+
+    const again = consolidateLegacyState(workspace);
+    assert.equal(again.importedMetrics, 0);
+    assert.deepEqual(readStartupMetrics(workspace).map((m) => m.ms), [11]);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("consolidateLegacyState adopts legacy config only while the canonical state file does not exist", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  writeLegacyShard(foreignData, workspace, {
+    state: { version: 1, config: { stopReviewGate: true }, jobs: [] }
+  });
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+
+  try {
+    const summary = consolidateLegacyState(workspace);
+    assert.equal(summary.adoptedConfig, true);
+    assert.equal(loadState(workspace).config.stopReviewGate, true);
+
+    // An established canonical file is never overwritten by residue.
+    setConfig(workspace, "stopReviewGate", false);
+    const secondData = makeTempDir();
+    writeLegacyShard(secondData, workspace, {
+      state: { version: 1, config: { stopReviewGate: true }, jobs: [] }
+    });
+    process.env.CLAUDE_PLUGIN_DATA = secondData;
+    const again = consolidateLegacyState(workspace);
+    assert.equal(again.adoptedConfig, false);
+    assert.equal(loadState(workspace).config.stopReviewGate, false);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("the state-root override gates default legacy scans off — hermetic envs cannot mark real machine shards", () => {
+  // Live regression (2026-08-07): e2e tests running the companion with the
+  // repo as cwd consolidated the REAL machine's legacy shards — rows were
+  // imported into a throwaway temp root and .migrated markers were stamped
+  // onto the real shards, permanently suppressing the genuine migration.
+  // With the override set (test isolation), only an explicitly planted
+  // ambient CLAUDE_PLUGIN_DATA is a legacy source; the config-dir and
+  // tmpdir-fallback scans need an explicit homedir opt-in.
+  const workspace = makeTempDir();
+  const legacyDir = path.join(os.tmpdir(), "codex-companion", path.basename(resolveStateDir(workspace)));
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(legacyDir, "metrics.jsonl"),
+    `${JSON.stringify({ at: "2026-08-01T00:00:00.000Z", kind: "startup", plugin: "codex", transport: "direct", ms: 99 })}\n`,
+    "utf8"
+  );
+
+  const gated = consolidateLegacyState(workspace);
+  assert.deepEqual(gated.shards, []);
+  assert.equal(fs.existsSync(path.join(legacyDir, "metrics.jsonl.migrated-codex")), false);
+
+  // The explicit opt-in re-enables the default scans (production has no
+  // override, so it always scans; this is the pre-install tmpdir import).
+  const opted = consolidateLegacyState(workspace, { homedir: makeTempDir() });
+  assert.equal(opted.importedMetrics, 1);
+  assert.deepEqual(readStartupMetrics(workspace).map((m) => m.ms), [99]);
+  assert.equal(fs.existsSync(path.join(legacyDir, "metrics.jsonl.migrated-codex")), true);
+});
+
+test("listLegacyStateShards discovers shards under the user's plugin-data dir without any ambient env", () => {
+  const workspace = makeTempDir();
+  const fakeHome = makeTempDir();
+  const pluginDataDir = path.join(fakeHome, ".claude", "plugins", "data", "codex-old-marketplace");
+  const shard = writeLegacyShard(pluginDataDir, workspace, {
+    state: { version: 1, config: { stopReviewGate: false }, jobs: [] }
+  });
+
+  const shards = listLegacyStateShards(workspace, { env: {}, homedir: fakeHome });
+  assert.deepEqual(shards, [shard]);
+
+  // A relocated harness config dir (CLAUDE_CONFIG_DIR) is honored for the
+  // scan, since plugins/data lives under it.
+  const shardsViaConfigDir = listLegacyStateShards(workspace, {
+    env: { CLAUDE_CONFIG_DIR: path.join(fakeHome, ".claude") },
+    homedir: makeTempDir()
+  });
+  assert.deepEqual(shardsViaConfigDir, [shard]);
+});
+
+test("summarizeLegacyStateShards reports job counts and pending metrics per shard", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  const shard = writeLegacyShard(foreignData, workspace, {
+    metrics: [{ at: "2026-08-01T00:00:00.000Z", kind: "startup", plugin: "codex", transport: "direct", ms: 5 }],
+    state: {
+      version: 1,
+      config: { stopReviewGate: false },
+      jobs: [
+        { id: "job-live", status: "running" },
+        { id: "job-done", status: "completed" }
+      ]
     }
+  });
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+
+  try {
+    const [summary] = summarizeLegacyStateShards(workspace);
+    assert.equal(summary.dir, shard);
+    assert.equal(summary.jobs.total, 2);
+    assert.equal(summary.jobs.active, 1);
+    assert.equal(summary.pendingMetrics, true);
+
+    consolidateLegacyState(workspace);
+    const [after] = summarizeLegacyStateShards(workspace);
+    assert.equal(after.pendingMetrics, false);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
   }
 });
 
@@ -427,23 +599,17 @@ test("a state root owned by another user is refused (squat resistance)", (t) => 
     t.skip("Simulating a foreign-owned root requires chown, i.e. root.");
     return;
   }
-  // Isolate to a private plugin-data root so chowning it to another uid never
-  // poisons the shared /tmp fallback that the other tests in this file use.
+  // Isolate to a private root so chowning it to another uid never poisons
+  // the suite-wide canonical override the other tests in this file use.
   const workspace = makeTempDir();
-  const pluginData = makeTempDir();
-  const previous = process.env.CLAUDE_PLUGIN_DATA;
-  process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  const stateRoot = makeTempDir();
+  const previous = process.env.CODEX_COMPANION_STATE_ROOT;
+  process.env.CODEX_COMPANION_STATE_ROOT = stateRoot;
   try {
-    const stateRoot = path.join(pluginData, "state");
-    fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
     fs.chownSync(stateRoot, 65534, 65534); // nobody
     assert.throws(() => ensureStateDir(workspace), /owned by another user/);
   } finally {
-    if (previous === undefined) {
-      delete process.env.CLAUDE_PLUGIN_DATA;
-    } else {
-      process.env.CLAUDE_PLUGIN_DATA = previous;
-    }
+    process.env.CODEX_COMPANION_STATE_ROOT = previous;
   }
 });
 

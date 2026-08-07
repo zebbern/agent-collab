@@ -13,9 +13,11 @@ import assert from "node:assert/strict";
 import { makeTempDir, run } from "./helpers.mjs";
 
 // Single-file runs bypass scripts/run-tests.mjs's env scrub; shed any ambient
-// installed-plugin data dir so per-workspace isolation assertions hold (both
-// plugins share the CLAUDE_PLUGIN_DATA var, merging their state under it).
+// installed-plugin data dir and pin both plugins' canonical state roots to
+// temp dirs so nothing touches the real per-user roots.
 delete process.env.CLAUDE_PLUGIN_DATA;
+process.env.CODEX_COMPANION_STATE_ROOT = makeTempDir("codex-plugin-baseline-root-");
+process.env.CURSOR_COMPANION_STATE_ROOT = makeTempDir("cursor-plugin-baseline-root-");
 
 import { appendStartupMetric as appendCodexStartupMetric } from "../plugins/codex/scripts/lib/state.mjs";
 import { appendStartupMetric as appendCursorStartupMetric } from "../plugins/cursor/scripts/lib/state.mjs";

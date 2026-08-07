@@ -527,7 +527,7 @@ test("automatic broker registration preserves a shared broker until its final ow
 
   const baseEnv = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: ownerIdentity
   };
@@ -597,7 +597,7 @@ test("existing broker reuse holds the registry lock through owner publication", 
   installFakeCodex(binDir, "review-ok");
   const baseEnv = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: getProcessIdentity(process.pid)
   };
@@ -655,7 +655,7 @@ test("existing broker reuse refuses an owner that dies at the publication bounda
   installFakeCodex(binDir, "review-ok");
   const baseEnv = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: getProcessIdentity(process.pid)
   };
@@ -897,7 +897,7 @@ test("automatic broker rolls back when the broker registration cannot be publish
   const ownerIdentity = getProcessIdentity(process.pid);
   const env = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     CODEX_COMPANION_SESSION_ID: "publish-failure-owner",
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: ownerIdentity
@@ -946,7 +946,7 @@ test("automatic broker rolls back when owner, state, or activation publication f
     installFakeCodex(binDir, "review-ok");
     const env = {
       ...buildEnv(binDir),
-      CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+      CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
       CODEX_COMPANION_SESSION_ID: `${failure}-failure-owner`,
       [SESSION_OWNER_PID_ENV]: String(process.pid),
       [SESSION_OWNER_IDENTITY_ENV]: ownerIdentity
@@ -1003,7 +1003,7 @@ test("automatic broker rollback remains locked until exact cleanup converges", a
   installFakeCodex(binDir, "review-ok");
   const env = withBrokerOwner({
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir
   }, "locked-rollback");
   let registration = null;
   let brokerPid = null;
@@ -1051,7 +1051,7 @@ test("a failed activation recovery marker is never reusable", async (t) => {
   installFakeCodex(binDir, "review-ok");
   const env = withBrokerOwner({
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir
   }, "failed-activation-marker");
   const unverifiedCleanup = async () => ({
     attempted: true,
@@ -1105,7 +1105,7 @@ test("a broker remains non-reusable until activation is acknowledged", async (t)
   installFakeCodex(binDir, "review-ok");
   const env = withBrokerOwner({
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir
   }, "pending-activation");
   let releaseActivation;
   const activationGate = new Promise((resolve) => {
@@ -1152,7 +1152,7 @@ test("a registered broker with a missing socket is not reusable", async (t) => {
   installFakeCodex(binDir, "review-ok");
   const env = withBrokerOwner({
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir
   }, "missing-socket");
   const session = await ensureBrokerSession(repo, { env });
   t.after(async () => {
@@ -1181,7 +1181,7 @@ test("a crashed broker reclaims its registered child before starting a replaceme
   installFakeCodex(binDir, "review-ok");
   const env = withBrokerOwner({
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir
   }, "crashed-broker-child-reclaim");
   const session = await ensureBrokerSession(repo, { env });
   const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
@@ -1264,7 +1264,7 @@ test("concurrent automatic broker launches converge on one registered process", 
   const ownerIdentity = getProcessIdentity(process.pid);
   const baseEnv = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: ownerIdentity
   };
@@ -1312,7 +1312,7 @@ test("an unreachable registered broker is never terminated while an owner is liv
   const ownerIdentity = getProcessIdentity(process.pid);
   const baseEnv = {
     ...buildEnv(binDir),
-    CLAUDE_PLUGIN_DATA: runtimePluginDataDir,
+    CODEX_COMPANION_STATE_ROOT: runtimePluginDataDir,
     [SESSION_OWNER_PID_ENV]: String(process.pid),
     [SESSION_OWNER_IDENTITY_ENV]: ownerIdentity
   };

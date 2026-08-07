@@ -50,14 +50,25 @@ function samePath(a, b) {
 }
 
 // Roots older versions (or the ambient-env bug) wrote under, per project:
-// the pre-install fallback (tmpdir) and whatever plugin data dir the current
-// environment carries. Only existing files are returned, deduplicated.
+// whatever plugin data dir the current environment carries, every
+// per-install plugin-data dir under the harness config dir (the ambient var
+// only names the LAST exporter — any install may hold a shard, and the codex
+// hook no longer exports the var at all), and the pre-install fallback
+// (tmpdir). Only existing files are returned, deduplicated.
 function legacyLedgerFiles(cwd) {
   const key = projectKey(cwd);
   const canonical = ledgerFile(cwd);
   const bases = [];
   if (process.env.CLAUDE_PLUGIN_DATA) {
     bases.push(process.env.CLAUDE_PLUGIN_DATA);
+  }
+  const pluginsData = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "plugins", "data");
+  try {
+    for (const entry of fs.readdirSync(pluginsData)) {
+      bases.push(path.join(pluginsData, entry));
+    }
+  } catch {
+    // No harness plugin-data dir on this machine.
   }
   bases.push(os.tmpdir());
   const files = [];

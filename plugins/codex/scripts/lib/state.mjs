@@ -6,9 +6,21 @@ import path from "node:path";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
+// State root doctrine (2026-08-07): ONE canonical root per user, independent
+// of the invocation context. Earlier versions resolved the root from ambient
+// CLAUDE_PLUGIN_DATA, but that var means "whichever plugin install's
+// SessionStart hook exported it last" — per-install data dirs (one per
+// marketplace), stale exports from uninstalled instances, and hook processes
+// seeing a different value than Bash all split one workspace's jobs across
+// roots ("No job found", orphaned workers, split broker registries). The var
+// survives below only as a legacy migration SOURCE. The override env var is
+// plugin-specific (no harness sets it ambiently) and exists for test
+// isolation.
+const STATE_ROOT_ENV = "CODEX_COMPANION_STATE_ROOT";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const METRICS_PLUGIN = "codex";
 const ENFORCE_POSIX_MODES = process.platform !== "win32";
-const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
+const LEGACY_FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 
 // Validate — and optionally create — a directory that must stay private to
 // this user. Job records and logs carry prompts and results, so a symlinked
@@ -164,17 +176,184 @@ export function resolveJobsDir(cwd) {
   return path.join(resolveStateDir(cwd), JOBS_DIR_NAME);
 }
 
-function resolveStateRoot() {
-  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  return pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
+export function resolveStateRoot(env = process.env) {
+  return env[STATE_ROOT_ENV] || path.join(os.homedir(), ".claude", "codex-companion");
+}
+
+// Windows paths compare case-insensitively; treating the canonical root as a
+// legacy source would import state into itself.
+function samePath(a, b) {
+  const left = path.resolve(a);
+  const right = path.resolve(b);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+// Roots older versions wrote under: whatever plugin data dir the current
+// environment still carries, every per-install data dir the harness keeps
+// under ~/.claude/plugins/data (the same workspace may have state under
+// several installs of this plugin), and the pre-install tmpdir fallback.
+//
+// When the state-root OVERRIDE is set (test isolation — production never
+// sets it), the config-dir and tmpdir scans are disabled unless a homedir
+// is explicitly injected: a hermetic test env running the companion against
+// a real workspace must never discover — and mark — the machine's real
+// legacy shards (that happened live 2026-08-07: e2e runs stamped .migrated
+// markers onto real shards while importing into a throwaway temp root).
+// A planted ambient CLAUDE_PLUGIN_DATA stays honored either way.
+function listLegacyStateRoots(options = {}) {
+  const env = options.env ?? process.env;
+  const canonicalRoot = resolveStateRoot(env);
+  const defaultScansAllowed = options.homedir != null || !env[STATE_ROOT_ENV];
+  const roots = [];
+  const push = (dir) => {
+    if (samePath(dir, canonicalRoot) || roots.some((seen) => samePath(seen, dir))) {
+      return;
+    }
+    roots.push(dir);
+  };
+  const ambient = env[PLUGIN_DATA_ENV];
+  if (typeof ambient === "string" && ambient !== "" && path.isAbsolute(ambient)) {
+    push(path.join(ambient, "state"));
+  }
+  if (!defaultScansAllowed) {
+    return roots;
+  }
+  const homedir = options.homedir ?? os.homedir();
+  const pluginsDataDir = path.join(env.CLAUDE_CONFIG_DIR || path.join(homedir, ".claude"), "plugins", "data");
+  let entries = [];
+  try {
+    entries = fs.readdirSync(pluginsDataDir);
+  } catch {
+    // No harness plugin-data dir on this machine.
+  }
+  for (const entry of entries) {
+    push(path.join(pluginsDataDir, entry, "state"));
+  }
+  push(LEGACY_FALLBACK_STATE_ROOT_DIR);
+  return roots;
+}
+
+export function listLegacyStateShards(cwd, options = {}) {
+  const canonicalDir = resolveStateDir(cwd);
+  const key = path.basename(canonicalDir);
+  const shards = [];
+  for (const root of listLegacyStateRoots(options)) {
+    const shard = path.join(root, key);
+    if (samePath(shard, canonicalDir)) {
+      continue;
+    }
+    try {
+      if (fs.statSync(shard).isDirectory()) {
+        shards.push(shard);
+      }
+    } catch {
+      // Missing shard — nothing was ever written under this root.
+    }
+  }
+  return shards;
+}
+
+function importShardMetrics(cwd, shard) {
+  const sourceFile = path.join(shard, METRICS_FILE_NAME);
+  const marker = `${sourceFile}.migrated-${METRICS_PLUGIN}`;
+  const sources = [`${sourceFile}.old`, sourceFile].filter((file) => fs.existsSync(file));
+  if (sources.length === 0 || fs.existsSync(marker)) {
+    return 0;
+  }
+  // Rows self-identify via the plugin field stamped at the append call site.
+  // A merged shard (both plugins wrote under one exported data dir) is split
+  // by that field: this plugin's rows cross, the sibling's stay for its own
+  // consolidation pass, and unattributable rows stay behind entirely.
+  const rows = sources
+    .flatMap((file) => readMetricsLines(file))
+    .filter((row) => row?.plugin === METRICS_PLUGIN)
+    .sort((left, right) => String(left.at ?? "").localeCompare(String(right.at ?? "")));
+  if (rows.length > 0) {
+    fs.appendFileSync(resolveMetricsFile(cwd), rows.map((row) => `${JSON.stringify(row)}\n`).join(""), { mode: 0o600 });
+  }
+  // The source file itself must survive for the sibling plugin; the marker is
+  // what makes this a one-time import.
+  try {
+    fs.writeFileSync(marker, "", { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw error;
+    }
+  }
+  return rows.length;
+}
+
+function adoptShardConfig(cwd, shards) {
+  if (fs.existsSync(resolveStateFile(cwd))) {
+    return false;
+  }
+  for (const shard of shards) {
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(shard, STATE_FILE_NAME), "utf8"));
+    } catch {
+      continue;
+    }
+    const config = { ...defaultState().config, ...(parsed?.config ?? {}) };
+    if (JSON.stringify(config) === JSON.stringify(defaultState().config)) {
+      continue;
+    }
+    saveStateUnlocked(cwd, { ...defaultState(), config });
+    return true;
+  }
+  return false;
+}
+
+// Heal a context split for the parts that can be re-homed honestly: startup
+// metrics (append-only, plugin-stamped — the broker-decision dataset) and
+// user config when the canonical index does not exist yet. Job RECORDS are
+// deliberately left in place: a merged shard cannot attribute a job to a
+// plugin, live legacy workers keep updating their own root, and cancel flags
+// re-homed away from a worker's polling path would be silently ignored. Jobs
+// are transient; residue is surfaced by doctor instead of migrated.
+export function consolidateLegacyState(cwd, options = {}) {
+  const shards = listLegacyStateShards(cwd, options);
+  if (shards.length === 0) {
+    return { shards, importedMetrics: 0, adoptedConfig: false };
+  }
+  ensureStateDir(cwd);
+  return withStateLock(cwd, () => {
+    let importedMetrics = 0;
+    for (const shard of shards) {
+      importedMetrics += importShardMetrics(cwd, shard);
+    }
+    const adoptedConfig = adoptShardConfig(cwd, shards);
+    return { shards, importedMetrics, adoptedConfig };
+  });
+}
+
+export function summarizeLegacyStateShards(cwd, options = {}) {
+  return listLegacyStateShards(cwd, options).map((dir) => {
+    let jobs = { total: 0, active: 0 };
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, STATE_FILE_NAME), "utf8"));
+      const list = Array.isArray(parsed?.jobs) ? parsed.jobs : [];
+      jobs = {
+        total: list.length,
+        active: list.filter((job) => !isTerminalJobStatus(job?.status)).length
+      };
+    } catch {
+      // Unreadable index: still report the shard, with zero counts.
+    }
+    const metricsFile = path.join(dir, METRICS_FILE_NAME);
+    const pendingMetrics =
+      (fs.existsSync(metricsFile) || fs.existsSync(`${metricsFile}.old`)) &&
+      !fs.existsSync(`${metricsFile}.migrated-${METRICS_PLUGIN}`);
+    return { dir, jobs, pendingMetrics };
+  });
 }
 
 export function ensureStateDir(cwd) {
   const stateDir = resolveStateDir(cwd);
   const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
   // Build the tree from the root down, validating each level before creating
-  // the next. The root is created recursively (its parents — %TEMP% or the
-  // harness-provided plugin-data dir — are out of our threat model), then
+  // the next. The root is created recursively (its parents — ~/.claude or a
+  // test-provided override dir — are out of our threat model), then
   // validated so a squatted or symlinked root is refused before anything is
   // written beneath it. The leaf and jobs dirs are created non-recursively so
   // a pre-planted symlink at either fails EEXIST rather than being followed.

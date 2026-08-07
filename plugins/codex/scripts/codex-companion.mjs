@@ -45,12 +45,14 @@ import {
 } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  consolidateLegacyState,
   generateJobId,
   getConfig,
   listJobs,
   readStartupMetrics,
   resolveStateDir,
   setConfig,
+  summarizeLegacyStateShards,
   upsertJob,
   writeCancelFlag,
   writeJobFile
@@ -399,7 +401,8 @@ async function handleDoctor(argv) {
       stateDir: resolveStateDir(workspaceRoot),
       jobs: listJobs(workspaceRoot),
       getLiveJobPidsImpl: buildLivenessProbe((jobs) => getLiveJobPids(jobs)),
-      commandPrefix: "/codex"
+      commandPrefix: "/codex",
+      legacyShards: summarizeLegacyStateShards(workspaceRoot)
     }),
     buildStartupOverheadCheck(() => readStartupMetrics(workspaceRoot))
   ];
@@ -419,6 +422,7 @@ async function handleSetup(argv) {
   }
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const workspaceRoot = resolveCommandWorkspace(options);
   const actionsTaken = [];
 
@@ -986,6 +990,7 @@ async function handleReviewCommand(argv, config) {
   }
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
@@ -1036,6 +1041,7 @@ async function handleTask(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const workspaceRoot = resolveCommandWorkspace(options);
   // Resolution order (once, before the foreground/background branch):
   // --profile supplies defaults; explicit --model overrides the profile
@@ -1103,6 +1109,7 @@ async function handleTransfer(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const { payload, rendered } = await executeTransfer(cwd, {
     source: options.source
   });
@@ -1195,6 +1202,7 @@ async function handleStatus(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const reference = positionals[0] ?? "";
   if (reference) {
     const snapshot = options.wait
@@ -1222,6 +1230,7 @@ function handleResult(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
@@ -1312,6 +1321,7 @@ export async function handleCancel(argv, dependencies = {}) {
   });
 
   const cwd = resolveCommandCwd(options);
+  consolidateLegacyState(cwd);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   let existing = readStoredJob(workspaceRoot, job.id) ?? {};

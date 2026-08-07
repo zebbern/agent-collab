@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -6,11 +7,54 @@ import { makeTempDir } from "./helpers.mjs";
 import { boundTelemetryItems } from "../plugins/codex/scripts/codex-companion.mjs";
 import {
   buildProgressSignals,
+  buildSingleJobSnapshot,
   buildStatusSnapshot,
   enrichJob,
+  resolveCancelableJob,
   STALE_QUEUED_JOB_THRESHOLD_MS
 } from "../plugins/codex/scripts/lib/job-control.mjs";
-import { listJobs, saveState, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveStateDir, saveState, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+
+// Keep every state write inside a temp canonical root — never the real
+// per-user ~/.claude/codex-companion. Single-file runs bypass the runner's
+// env scrub, so shed the live session id too: it would session-filter the
+// synthetic jobs these tests plant (observed on the first real install).
+process.env.CODEX_COMPANION_STATE_ROOT = makeTempDir("codex-plugin-status-root-");
+delete process.env.CODEX_COMPANION_SESSION_ID;
+
+test("a job miss names legacy state residue when an older root still holds jobs", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  const shard = path.join(foreignData, "state", path.basename(resolveStateDir(workspace)));
+  fs.mkdirSync(shard, { recursive: true });
+  fs.writeFileSync(
+    path.join(shard, "state.json"),
+    JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs: [{ id: "task-legacy", status: "running" }] }),
+    "utf8"
+  );
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+
+  try {
+    assert.throws(() => buildSingleJobSnapshot(workspace, "task-legacy"), (error) => {
+      assert.match(error.message, /No job found for "task-legacy"/);
+      assert.match(error.message, /older plugin version left job state/);
+      assert.match(error.message, /codex:doctor/);
+      return true;
+    });
+    assert.throws(() => resolveCancelableJob(workspace, "task-legacy"), /older plugin version left job state/);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("a job miss stays terse when no legacy residue exists", () => {
+  const workspace = makeTempDir();
+  assert.throws(() => buildSingleJobSnapshot(workspace, "task-nope"), (error) => {
+    assert.match(error.message, /No job found for "task-nope"/);
+    assert.doesNotMatch(error.message, /older plugin version/);
+    return true;
+  });
+});
 
 test("boundTelemetryItems keeps short lists untouched", () => {
   const items = [{ id: "cmd-1" }, { id: "cmd-2" }];

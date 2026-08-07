@@ -10,9 +10,11 @@ import { spawn } from "node:child_process";
 
 import { makeTempDir } from "./helpers.mjs";
 import {
+  consolidateLegacyState,
   ensureStateDir,
   listJobs,
   loadState,
+  readStartupMetrics,
   resolveStateDir,
   saveState,
   updateState,
@@ -21,6 +23,54 @@ import {
   writeJobFile
 } from "../plugins/cursor/scripts/lib/state.mjs";
 import { createJobLogFile } from "../plugins/cursor/scripts/lib/tracked-jobs.mjs";
+
+// Single-file runs bypass scripts/run-tests.mjs's env scrub; shed any ambient
+// installed-plugin data dir and pin the canonical root to a temp dir so
+// nothing touches the real per-user ~/.claude/cursor-companion.
+delete process.env.CLAUDE_PLUGIN_DATA;
+const suiteStateRoot = makeTempDir("cursor-plugin-state-root-");
+process.env.CURSOR_COMPANION_STATE_ROOT = suiteStateRoot;
+
+test("resolveStateDir puts each workspace under the cursor canonical state root, ignoring CLAUDE_PLUGIN_DATA", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  const canonical = resolveStateDir(workspace);
+  assert.equal(canonical.startsWith(suiteStateRoot), true);
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+  try {
+    assert.equal(resolveStateDir(workspace), canonical);
+    ensureStateDir(workspace);
+    assert.equal(fs.existsSync(path.join(foreignData, "state")), false);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
+
+test("cursor consolidation imports only cursor-stamped metrics rows and leaves its own marker", () => {
+  const workspace = makeTempDir();
+  const foreignData = makeTempDir();
+  const shard = path.join(foreignData, "state", path.basename(resolveStateDir(workspace)));
+  fs.mkdirSync(shard, { recursive: true });
+  fs.writeFileSync(
+    path.join(shard, "metrics.jsonl"),
+    [
+      JSON.stringify({ at: "2026-08-01T00:00:00.000Z", kind: "startup", plugin: "codex", transport: "direct", ms: 11 }),
+      JSON.stringify({ at: "2026-08-02T00:00:00.000Z", kind: "startup", plugin: "cursor", transport: "wsl", ms: 22 })
+    ].join("\n") + "\n",
+    "utf8"
+  );
+  process.env.CLAUDE_PLUGIN_DATA = foreignData;
+  try {
+    const summary = consolidateLegacyState(workspace);
+    assert.equal(summary.importedMetrics, 1);
+    assert.deepEqual(readStartupMetrics(workspace).map((m) => m.ms), [22]);
+    assert.equal(fs.existsSync(path.join(shard, "metrics.jsonl.migrated-cursor")), true);
+    // The codex-stamped row stays for the sibling plugin's own pass.
+    assert.equal(fs.existsSync(path.join(shard, "metrics.jsonl")), true);
+  } finally {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  }
+});
 
 test("a stale snapshot save cannot resurrect a cancelled job", () => {
   const workspace = makeTempDir();
@@ -105,23 +155,17 @@ test("a state root owned by another user is refused (squat resistance)", (t) => 
     t.skip("Simulating a foreign-owned root requires chown, i.e. root.");
     return;
   }
-  // Isolate to a private plugin-data root so chowning it to another uid never
-  // poisons the shared /tmp fallback that the other tests in this file use.
+  // Isolate to a private root so chowning it to another uid never poisons
+  // the suite-wide canonical override the other tests in this file use.
   const workspace = makeTempDir();
-  const pluginData = makeTempDir();
-  const previous = process.env.CLAUDE_PLUGIN_DATA;
-  process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  const stateRoot = makeTempDir();
+  const previous = process.env.CURSOR_COMPANION_STATE_ROOT;
+  process.env.CURSOR_COMPANION_STATE_ROOT = stateRoot;
   try {
-    const stateRoot = path.join(pluginData, "state");
-    fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
     fs.chownSync(stateRoot, 65534, 65534); // nobody
     assert.throws(() => ensureStateDir(workspace), /owned by another user/);
   } finally {
-    if (previous === undefined) {
-      delete process.env.CLAUDE_PLUGIN_DATA;
-    } else {
-      process.env.CLAUDE_PLUGIN_DATA = previous;
-    }
+    process.env.CURSOR_COMPANION_STATE_ROOT = previous;
   }
 });
 

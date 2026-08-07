@@ -17,6 +17,13 @@
   drained source left as a `.migrated` marker so nothing imports twice. A
   root-splitting regression guard pins that the state dir is identical
   across invocation contexts.
+- Legacy-source discovery no longer depends on the ambient var being present:
+  consolidation also scans every per-install plugin-data dir under the
+  harness config dir (`CLAUDE_CONFIG_DIR` or `~/.claude`, then
+  `plugins/data/*`). The codex plugin stopped exporting `CLAUDE_PLUGIN_DATA`
+  session-wide when the sibling plugins moved to canonical roots, so shards
+  stranded under a per-install data dir would otherwise have become
+  undiscoverable.
 - Retro events and evaluate-prior-adoptions: `retro-record` appends a `retro`
   ledger event (scope, disposition count, floor verdict, optional proposal PR
   and findings count), and `/goal:retro` now requires evaluating prior

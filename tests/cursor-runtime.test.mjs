@@ -23,7 +23,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs");
 
 // Isolate cursor-companion state from any real plugin data dir on this host.
-process.env.CLAUDE_PLUGIN_DATA = makeTempDir("cursor-plugin-runtime-state-");
+process.env.CURSOR_COMPANION_STATE_ROOT = makeTempDir("cursor-plugin-runtime-state-");
 
 function makeTaskRepo() {
   const repo = makeTempDir("cursor-plugin-test-");

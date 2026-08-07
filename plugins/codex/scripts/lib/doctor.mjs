@@ -143,7 +143,9 @@ export function buildStartupOverheadCheck(readMetrics) {
 /**
  * State-hygiene checks shared by both plugins. The context carries the
  * plugin-specific pieces so this module stays provider-free:
- * { stateDir, jobs, getLiveJobPidsImpl, commandPrefix, staleLockMs? }.
+ * { stateDir, jobs, getLiveJobPidsImpl, commandPrefix, staleLockMs?,
+ *   legacyShards? } — legacyShards is summarizeLegacyStateShards output:
+ * [{ dir, jobs: { total, active }, pendingMetrics }].
  * getLiveJobPidsImpl may return null to signal that liveness is unknown.
  * Every artifact these checks surface is something the failure paths write
  * deliberately and nothing else ever reads back.
@@ -151,7 +153,33 @@ export function buildStartupOverheadCheck(readMetrics) {
 export function buildStateHygieneChecks(context) {
   const staleLockMs = context.staleLockMs ?? 10_000;
   const jobs = context.jobs ?? [];
+  const legacyShards = context.legacyShards ?? [];
   return [
+    {
+      id: "state-root-residue",
+      run: () => {
+        if (legacyShards.length === 0) {
+          return { status: "ok", message: "All state for this workspace lives under the canonical state root." };
+        }
+        const active = legacyShards.reduce((sum, shard) => sum + (shard.jobs?.active ?? 0), 0);
+        const details = legacyShards.map(
+          (shard) =>
+            `${shard.dir}: ${shard.jobs?.total ?? 0} job record(s), ${shard.jobs?.active ?? 0} active${shard.pendingMetrics ? ", metrics import pending" : ""}`
+        );
+        if (active > 0) {
+          return {
+            status: "warning",
+            message: `${legacyShards.length} pre-canonical state root(s) left by an older plugin version still hold ${active} active job record(s). Those jobs finish on their own but cannot be steered from here; the shard is safe to delete once nothing in it is active.`,
+            details
+          };
+        }
+        return {
+          status: "warning",
+          message: `${legacyShards.length} pre-canonical state root(s) left by an older plugin version hold only inert records; safe to delete after inspection.`,
+          details
+        };
+      }
+    },
     {
       id: "jobs-cleanup-pending",
       run: () => {

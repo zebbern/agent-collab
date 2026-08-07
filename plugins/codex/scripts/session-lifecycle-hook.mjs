@@ -29,7 +29,6 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { runRegisteredBrokerReaper } from "./registered-broker-reaper.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
-const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 
 function readHookInput() {
   const raw = fs.readFileSync(0, "utf8").trim();
@@ -140,7 +139,9 @@ export async function cleanupSessionJobs(cwd, sessionId, dependencies = {}) {
 export async function handleSessionStart(input, dependencies = {}) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
-  appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  // CLAUDE_PLUGIN_DATA is deliberately NOT exported: state lives under one
+  // canonical per-user root now, and re-exporting this install's data dir
+  // session-wide is what used to split state across invocation contexts.
   if ((dependencies.platform ?? process.platform) === "win32") {
     return;
   }

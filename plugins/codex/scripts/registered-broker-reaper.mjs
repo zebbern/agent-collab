@@ -33,7 +33,7 @@ const ENFORCE_POSIX_MODES = process.platform !== "win32";
 
 function listRegistrationCandidates(env) {
   const registryRoot = resolveBrokerOwnershipRoot(env);
-  if (!registryRoot || !fs.existsSync(registryRoot)) {
+  if (!fs.existsSync(registryRoot)) {
     return [];
   }
   try {

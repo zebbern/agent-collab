@@ -27,6 +27,33 @@ const SCRIPT = path.join(ROOT, "plugins", "goal", "scripts", "goal-companion.mjs
 // exercising exactly that hostility, so scrub any ambient value here.
 process.env.GOAL_COMPANION_STATE_ROOT = makeTempDir("goal-plugin-test-state-");
 delete process.env.CLAUDE_PLUGIN_DATA;
+delete process.env.CLAUDE_CONFIG_DIR;
+
+test("readLedger discovers legacy shards under the config dir's plugin-data without any ambient CLAUDE_PLUGIN_DATA", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  const configDir = makeTempDir("goal-plugin-test-config-");
+  // The codex hook's session-wide export is gone; shards left under any
+  // per-install plugin-data dir must still be findable by scanning the
+  // config dir the harness actually uses.
+  const strandedDir = path.join(configDir, "plugins", "data", "codex-inline", "goal-companion", path.basename(stateDir(project)));
+  fs.mkdirSync(strandedDir, { recursive: true });
+  const strandedFile = path.join(strandedDir, "ledger.jsonl");
+  fs.writeFileSync(
+    strandedFile,
+    `${JSON.stringify({ at: "2026-08-01T00:00:00.000Z", slug: "g", itemId: "stranded", event: "step-started" })}\n`,
+    "utf8"
+  );
+
+  process.env.CLAUDE_CONFIG_DIR = configDir;
+  try {
+    const { entries } = readLedger(project);
+    assert.deepEqual(entries.map((entry) => entry.itemId), ["stranded"]);
+    assert.ok(!fs.existsSync(strandedFile));
+    assert.ok(fs.existsSync(`${strandedFile}.migrated`));
+  } finally {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
 
 test("parseCommandInput handles flags, values, positionals, and the -C alias", () => {
   const { options, positionals } = parseCommandInput(

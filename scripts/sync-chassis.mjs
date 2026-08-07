@@ -32,7 +32,16 @@ const IDENTICAL_MODULES = ["args.mjs", "prompts.mjs", "workspace.mjs", "process.
 // listed literal must occur in the source module, or the pair table is stale
 // and the run fails rather than silently under-swapping.
 const LITERAL_SWAP_MODULES = new Map([
-  ["state.mjs", [["codex-companion", "cursor-companion"]]],
+  [
+    "state.mjs",
+    [
+      ["codex-companion", "cursor-companion"],
+      ["CODEX_COMPANION_STATE_ROOT", "CURSOR_COMPANION_STATE_ROOT"],
+      // The metrics plugin stamp drives legacy-shard row attribution and the
+      // per-plugin .migrated marker suffix.
+      ['METRICS_PLUGIN = "codex"', 'METRICS_PLUGIN = "cursor"']
+    ]
+  ],
   [
     "tracked-jobs.mjs",
     [
