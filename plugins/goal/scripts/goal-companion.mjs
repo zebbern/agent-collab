@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 
 import { parseCommandInput, resolveCommandCwd } from "./lib/args.mjs";
-import { resolveGoal, saveGoal, validateGoal, TERMINAL_ITEM_STATUSES } from "./lib/goal-state.mjs";
+import { goalsDir, listGoalFiles, resolveGoal, saveGoal, validateGoal, TERMINAL_ITEM_STATUSES } from "./lib/goal-state.mjs";
 import { appendLedger, readLedger } from "./lib/ledger.mjs";
 
 function printUsage() {
@@ -19,7 +19,7 @@ function printUsage() {
       "  node scripts/goal-companion.mjs start <slug> <itemId> [--json]",
       "  node scripts/goal-companion.mjs record <slug> <itemId> --disposition <merged|discarded|dropped|blocked> [--pr <n>] [--delegate <codex|cursor|none>] [--notes <text>] [--json]",
       "  node scripts/goal-companion.mjs check [slug] [--json]",
-      "  node scripts/goal-companion.mjs ledger [slug] [--json]",
+      "  node scripts/goal-companion.mjs ledger [slug|--all] [--json]",
       "  node scripts/goal-companion.mjs close <slug> (--done|--abandoned) [--json]",
       "  node scripts/goal-companion.mjs help",
       "",
@@ -395,11 +395,34 @@ async function handleCheck(argv) {
 async function handleLedger(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json", "all"]
   });
   const cwd = resolveCommandCwd(options);
   // Read-only: works on goals of any status (the retrospective reads history,
   // it never advances work), so no active-goal gate here.
+  if (options.all) {
+    // Portfolio scope: every goal in this project's ledger, pooled — the
+    // cross-goal view policy retrospectives need. Entries carry their slug,
+    // so nothing is lost by pooling; the render prefixes it.
+    if (positionals.length > 0) {
+      throw new Error("ledger --all takes no slug; drop one or the other.");
+    }
+    const goals = listGoalFiles(cwd).map((entry) => entry.slug);
+    if (goals.length === 0) {
+      throw new Error(`No goal files found under ${goalsDir(cwd)}. Create one with /goal:set.`);
+    }
+    const { entries, corruptCount } = readLedger(cwd);
+    const lines = [
+      ...entries.map((entry) => `[${entry.slug}] ${formatLedgerLine(entry)}`),
+      corruptCount > 0 ? `Ledger: ${corruptCount} corrupt line(s) skipped.` : null
+    ].filter((line) => line !== null);
+    output(
+      { scope: "portfolio", goals, entries, corruptLedgerLines: corruptCount },
+      `${lines.join("\n")}\n`,
+      options.json
+    );
+    return;
+  }
   const { slug } = resolveGoal(cwd, positionals[0] ?? "");
   const { entries, corruptCount } = readLedger(cwd);
   const goalEntries = entries.filter((entry) => entry.slug === slug);

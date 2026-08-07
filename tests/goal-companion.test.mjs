@@ -367,6 +367,40 @@ test("ledger is read-only history: it works on a closed (non-active) goal", () =
   assert.equal(payload.entries.at(-1).status, "abandoned");
 });
 
+test("ledger --all pools every goal's events for the portfolio scope", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project, { slug: "goal-a" });
+  writeGoalFixture(project, { slug: "goal-b" });
+  companion(["start", "goal-a", "first-item"], project);
+  companion(["record", "goal-a", "first-item", "--disposition", "discarded", "--notes", "n/a"], project);
+  companion(["start", "goal-b", "first-item"], project);
+
+  const pooled = companion(["ledger", "--all", "--json"], project);
+  assert.equal(pooled.status, 0, pooled.stderr);
+  const payload = JSON.parse(pooled.stdout);
+  assert.equal(payload.scope, "portfolio");
+  assert.deepEqual([...payload.goals].sort(), ["goal-a", "goal-b"]);
+  // Every pooled entry keeps its slug, so grouping by goal stays possible.
+  assert.equal(payload.entries.length, 3);
+  assert.ok(payload.entries.every((entry) => entry.slug === "goal-a" || entry.slug === "goal-b"));
+  // The text render prefixes the slug for the same reason.
+  const rendered = companion(["ledger", "--all"], project);
+  assert.match(rendered.stdout, /\[goal-b\] .*step-started/);
+});
+
+test("ledger --all refuses a slug and refuses an empty project", () => {
+  const project = makeTempDir("goal-plugin-test-proj-");
+  writeGoalFixture(project);
+  const both = companion(["ledger", "test-goal", "--all"], project);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /--all takes no slug/);
+
+  const empty = makeTempDir("goal-plugin-test-proj-");
+  const none = companion(["ledger", "--all"], empty);
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /No goal files found/);
+});
+
 test("record enforces the state machine and blocked halts the goal", () => {
   const project = makeTempDir("goal-plugin-test-proj-");
   writeGoalFixture(project);

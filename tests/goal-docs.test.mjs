@@ -74,7 +74,7 @@ test("goal step command pins the unattended operation recipe", () => {
 test("goal retro command pins its frontmatter and hard rules", () => {
   const retro = read(path.join("commands", "retro.md"));
   assert.match(retro, /^description: Analyze the goal ledger and propose policy improvements$/m);
-  assert.match(retro, /^argument-hint: "\[slug\]"$/m);
+  assert.match(retro, /^argument-hint: "\[slug\|--all\]"$/m);
   assert.match(retro, /^disable-model-invocation: true$/m);
   assert.match(retro, /^allowed-tools: Bash\(node:\*\)$/m);
   assert.match(retro, /goal-companion\.mjs" ledger/);
@@ -103,6 +103,28 @@ test("goal retro command pins the four-event ledger vocabulary and the goal-file
   // closed events feed the retro's goal-level analysis.
   assert.match(retro, /Goal-level outcomes and their timing/);
   assert.match(retro, /`closed` event/);
+});
+
+test("goal retro command pins the two scopes and the method-invention mandate", () => {
+  const retro = read(path.join("commands", "retro.md"));
+  // Per-goal is the process retro; portfolio is the policy retro (the outer
+  // loop), and the floor counts at the scope being run.
+  assert.match(retro, /process retro/);
+  assert.match(retro, /policy retro/);
+  assert.match(retro, /the outer loop/);
+  assert.match(retro, /retro --all/);
+  assert.match(retro, /at the (running )?scope/);
+  // Portfolio reports must expose heterogeneity and their own limits.
+  assert.match(retro, /group findings by goal/);
+  assert.match(retro, /per-project and per-machine/);
+  // Global artifacts change on global evidence.
+  assert.match(retro, /global artifacts\s+change on global evidence/i);
+  // The method-invention mandate: procedures, not just parameters — riding
+  // the same rails, and grounded in cited evidence.
+  assert.match(retro, /Methods are policy artifacts too/);
+  assert.match(retro, /invent better ways of searching/);
+  assert.match(retro, /this command's own\s+analysis method/);
+  assert.match(retro, /a method opinion without a citation is not/);
 });
 
 test("README documents the goal plugin", () => {
