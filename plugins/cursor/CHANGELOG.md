@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The doctor roster probe now builds its command line through cursor.mjs's exported plan builder instead of replaying the construction by hand — a plan-shape change can no longer silently strand it. The cmd-shim refusal remains (runCommand cannot carry windowsVerbatimArguments to spawnSync).
+
 ## 0.5.0
 
 - `/cursor:doctor` gained `model-roster-pins`: warns when a pinned `--profile` model id (`deep` = `gpt-5.6-sol-xhigh`, `fast` = `cursor-grok-4.5-high-fast`) no longer exists in the live `cursor-agent --list-models` roster, naming the stale profile and id and pointing at updating the profile table or passing `--model` explicitly. The probe runs through the plugin's already-resolved invocation plan (native PATH binary or the WSL fallback), so it never diverges from how a real turn is spawned. A roster the probe cannot read — CLI unavailable, the command failing, or empty/unparseable output — is always reported as unauditable (warning), never as "every id is missing" and never as a false "ok"; unknown is not healthy. The check builder (`buildModelRosterCheck`, shared chassis with the codex plugin) is provider-free and takes the profile table and roster-probe function as injected context, so tests never invoke a real CLI.

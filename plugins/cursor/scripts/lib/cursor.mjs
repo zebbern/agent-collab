@@ -332,7 +332,10 @@ export async function reapWslAgent(pid, options = {}) {
   return { reaped: false, survivors: [Math.trunc(pid)] };
 }
 
-function planCommandLine(plan, args) {
+// Exported for the companion's roster probe: every consumer of an invocation
+// plan must build its command line HERE, so a change to the plan shape can
+// never silently strand a caller that replayed the construction by hand.
+export function planCommandLine(plan, args) {
   if (plan.kind === "cmd-shim") {
     return {
       file: plan.file,
