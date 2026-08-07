@@ -11,6 +11,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir, run } from "./helpers.mjs";
+
+// Single-file runs bypass scripts/run-tests.mjs's env scrub; shed any ambient
+// installed-plugin data dir so per-workspace isolation assertions hold (both
+// plugins share the CLAUDE_PLUGIN_DATA var, merging their state under it).
+delete process.env.CLAUDE_PLUGIN_DATA;
+
 import { appendStartupMetric as appendCodexStartupMetric } from "../plugins/codex/scripts/lib/state.mjs";
 import { appendStartupMetric as appendCursorStartupMetric } from "../plugins/cursor/scripts/lib/state.mjs";
 import {

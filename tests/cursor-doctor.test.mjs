@@ -210,6 +210,22 @@ test("cursor plugin install checks flag a namespace collision and a stale cached
   assert.doesNotMatch(byId.get("plugin-cache-stale").details.join(" "), /0\.4\.0/);
 });
 
+test("cursor: a live install dir recorded by installPath is never stale", async () => {
+  // Mirror of the codex regression (first real install, 2026-08-07): the
+  // registry's installPath is authoritative even when the dir name does not
+  // equal the recorded version string.
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  const liveDir = path.join(pluginsDir, "cache", "agent-collab", "cursor", "0.5.1-build.2");
+  writePluginRegistry(pluginsDir, {
+    "cursor@agent-collab": [{ scope: "user", version: "0.5.1+build.2", installPath: liveDir }]
+  });
+  fs.mkdirSync(liveDir, { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "cursor", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+  assert.equal(byId.get("plugin-cache-stale").status, "ok", byId.get("plugin-cache-stale").message);
+});
+
 test("cursor plugin install checks pass for a single-marketplace install with a clean cache", async () => {
   const pluginsDir = path.join(makeTempDir(), "plugins");
   writePluginRegistry(pluginsDir, { "cursor@agent-collab": [{ scope: "user", version: "0.4.0" }] });

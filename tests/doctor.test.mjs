@@ -318,6 +318,43 @@ test("plugin install checks flag a namespace collision and a stale cached copy",
   assert.doesNotMatch(byId.get("plugin-cache-stale").details.join(" "), /1\.0\.6/);
 });
 
+test("a live install whose dir name sanitizes the version's + is not stale", async () => {
+  // Regression for a false positive found on the first real install of this
+  // fork (2026-08-07): the installer writes version 1.0.6+fork.6 into a dir
+  // named 1.0.6-fork.6 and records that dir as installPath. Name-vs-version
+  // comparison flagged the LIVE install as safe-to-delete residue.
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  const liveDir = path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6-fork.6");
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [{ scope: "user", version: "1.0.6+fork.6", installPath: liveDir }]
+  });
+  fs.mkdirSync(liveDir, { recursive: true });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.5-fork.1"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+
+  // The live (sanitized) dir is registered; the genuinely-unregistered old
+  // sanitized dir is still caught.
+  assert.equal(byId.get("plugin-cache-stale").status, "warning");
+  assert.doesNotMatch(byId.get("plugin-cache-stale").details.join(" "), /1\.0\.6-fork\.6/);
+  assert.match(byId.get("plugin-cache-stale").details.join(" "), /1\.0\.5-fork\.1/);
+});
+
+test("a sanitized dir name matching a recorded version needs no installPath to be registered", async () => {
+  // Older registry entries may lack installPath; the sanitized-name fallback
+  // must still recognize the live dir.
+  const pluginsDir = path.join(makeTempDir(), "plugins");
+  writePluginRegistry(pluginsDir, {
+    "codex@agent-collab": [{ scope: "user", version: "1.0.6+fork.6" }]
+  });
+  fs.mkdirSync(path.join(pluginsDir, "cache", "agent-collab", "codex", "1.0.6-fork.6"), { recursive: true });
+
+  const report = await runDoctorChecks(buildPluginInstallChecks({ pluginName: "codex", pluginsDir }));
+  const byId = new Map(report.checks.map((check) => [check.id, check]));
+  assert.equal(byId.get("plugin-cache-stale").status, "ok", byId.get("plugin-cache-stale").message);
+});
+
 test("a single-marketplace install with a fully registered cache is healthy", async () => {
   const pluginsDir = path.join(makeTempDir(), "plugins");
   // Two install records (user + project scope): both versions are
