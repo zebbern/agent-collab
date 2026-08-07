@@ -15,6 +15,7 @@ Run Codex and Cursor as background workers inside Claude Code — reviews, tasks
 [Codex plugin](#codex-plugin) •
 [Cursor plugin](#cursor-plugin) •
 [Ambient delegation](#ambient-delegation) •
+[Goal plugin](#goal-plugin) •
 [How it works](#how-it-works) •
 [Development](#development) •
 [License](#license--attribution)
@@ -263,6 +264,26 @@ Claude: Codex found two issues in the cancel path. Findings below — nothing
 ```
 
 Review findings are never auto-applied, and if a delegated run fails, Claude reports the failure instead of passing off its own output as the delegate's.
+
+## Goal plugin
+
+Set a long-horizon goal once, then advance it one increment at a time — in
+session, with you watching. `/goal:set` writes a schema-validated, git-tracked
+goal file (`.claude/goals/<slug>.json`) with a ranked backlog and acceptance
+criteria; `/goal:step` picks the next increment deterministically, executes it
+(delegating to Codex or Cursor through the same skills as above), lands the
+change as a PR through your normal gates, and records what actually happened
+— merged, discarded, or blocked — in the goal file and an append-only ledger.
+The companion enforces the honest parts mechanically: one in-progress item at
+a time, refusals with specifics instead of silent repair, and a blocked goal
+is a full stop until a human resolves it.
+
+```bash
+/plugin install goal@agent-collab
+/goal:set    # interview → validated goal file
+/goal:step   # advance exactly one increment
+/goal:status
+```
 
 ## How it works
 

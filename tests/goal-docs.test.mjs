@@ -33,3 +33,31 @@ test("goal plugin ships license and changelog", () => {
   assert.match(read("LICENSE"), /Apache License/);
   assert.match(read("CHANGELOG.md"), /## 0\.1\.0/);
 });
+
+test("goal step command pins the one-increment choreography", () => {
+  const step = read(path.join("commands", "step.md"));
+  assert.match(step, /One increment per invocation/);
+  assert.match(step, /Announce the increment in one line/);
+  assert.match(step, /goal-companion\.mjs" next/);
+  assert.match(step, /goal-companion\.mjs" start/);
+  assert.match(step, /Analysis and implementation are separate delegations/);
+  assert.match(step, /refine the brief with the failure evidence and re-delegate once/);
+  assert.match(step, /--disposition blocked/);
+  assert.match(step, /Do not start another increment/);
+});
+
+test("goal-runner skill pins the policy", () => {
+  const skill = read(path.join("skills", "goal-runner", "SKILL.md"));
+  assert.match(skill, /^name: goal-runner$/m);
+  assert.match(skill, /one increment at a time/i);
+  assert.match(skill, /codex-delegation|cursor-delegation/);
+  assert.match(skill, /blocked is a full stop/i);
+  assert.match(skill, /Never invent progress/);
+});
+
+test("README documents the goal plugin", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  assert.match(readme, /## Goal plugin/);
+  assert.match(readme, /\[Goal plugin\]\(#goal-plugin\)/);
+  assert.match(readme, /one increment at a time/);
+});
