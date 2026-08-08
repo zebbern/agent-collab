@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "d3-eperm-rename",
+  "fixSha": "8ef40586030c497133d27c1c8f5694d64895c768",
+  "parentSha": "e906cb51300c10e274ebb33687f2c549a4cd6fce",
+  "symptomFile": "symptom.md",
+  "groundTruth": {
+    "tests": [
+      { "from": "tests/bench-state-rename.test.mjs", "to": "tests/bench-state-rename.test.mjs" }
+    ],
+    "fixtures": []
+  },
+  "classBonus": null,
+  "originalStrict": {
+    "transplantFromFix": [
+      "tests/state.test.mjs"
+    ],
+    "excludeTestNames": [],
+    "caveat": "calls===2/11 assertions pin fs.renameSync identity and a retry budget of exactly 10; valid alternative fixes fail them"
+  },
+  "regressionSuite": [
+    "tests/state.test.mjs"
+  ],
+  "driftCheckRequired": false,
+  "timeouts": {
+    "claudeMs": 600000,
+    "testMs": 120000
+  },
+  "budgetUsd": 2,
+  "forbiddenSymptomStrings": [
+    "retry",
+    "jitter",
+    "EBUSY",
+    "renameWithContentionRetry"
+  ]
+}

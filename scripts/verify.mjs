@@ -15,6 +15,7 @@
 // cannot run, the summary says UNVERIFIED and the gate is INCOMPLETE — the
 // same "unknown is not healthy" doctrine the runtime code follows.
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -91,13 +92,16 @@ if (skipLinux) {
       [
         "run", "--rm", "-v", mount, "node:22",
         "bash", "-lc",
-        // .git is excluded from the copy: from a git WORKTREE it is a pointer
-        // file whose target does not exist in the container, which kills every
-        // git invocation (the chassis-drift guard's `git diff --no-index`
-        // died with exit 128 and hashed empty diffs). No test needs the
-        // repo's git history, and --no-index works with no repo at all —
-        // excluding it also skips copying the object DB into the container.
-        "mkdir /work && tar -C /repo --exclude=./.git -cf - . | tar -C /work -xf - && " +
+        // .git handling is conditional. From a git WORKTREE it is a pointer
+        // file whose target does not exist in the container, which kills
+        // every git invocation (the chassis-drift guard's `git diff
+        // --no-index` died with exit 128 and hashed empty diffs) — so a
+        // pointer-file .git is excluded, and the bench archaeology tests
+        // skip loudly inside the container. From a REAL checkout .git is a
+        // directory and is included: tests/bench-manifest.test.mjs verifies
+        // historical fix/parent SHAs and needs the object DB, so "no test
+        // needs the repo's git history" stopped being true on 2026-08-08.
+        `mkdir /work && tar -C /repo ${fs.statSync(path.join(ROOT, ".git")).isDirectory() ? "" : "--exclude=./.git "}-cf - . | tar -C /work -xf - && ` +
           "cd /work && node scripts/run-tests.mjs > /tmp/suite.log 2>&1; status=$?; " +
           "grep -E '^not ok' /tmp/suite.log; grep -E '^# (tests|pass|fail|skipped)' /tmp/suite.log; exit $status"
       ],
