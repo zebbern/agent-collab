@@ -11,7 +11,7 @@ This skill is the policy and the loop for delegating work to Codex without a `/c
 
 - Delegate when an independent deep pass adds real value: a second opinion on a risky change, security or architecture analysis, an adversarial review of a substantive diff, or an implementation that can run in parallel while the session continues on something else.
 - Keep trivial work local. A rename, a one-file edit, a question Claude can answer directly — spawning a background agent there is overhead, not help.
-- Bench evidence, 2026-08-08 (docs/bench-pilot-2026-08-08.md): on a well-localized single-file bugfix with a reproducible symptom, a Codex-delegation arm matched solo Claude's fix rate exactly (3/3 both arms) while costing ~30% more wall time. Symptom-shaped bugfixes with a clear reproduction are solo work by default; delegation earns its overhead in the niches above — independent deep review, second opinions on risky changes, parallel work the session does not wait on.
+- Bench evidence, 2026-08-08 (docs/bench-pilot-2026-08-08.md): on the pilot's one comparable cell — a well-localized single-file bugfix with a reproducible symptom — a Codex-delegation arm matched solo Claude's fix rate exactly (3/3 both arms) while costing ~30% more wall time. n=3, one task shape: a direction, not a law. For fixes of that measured shape, default to solo unless the change carries a genuine risk or second-opinion dimension; broader bugfix classes keep the guidance above unchanged until more cells replicate.
 - Never delegate when the user explicitly asked Claude to do the work personally.
 - Run one delegated job of a class at a time (one task, one review). Before firing a new one, run `status --json` and confirm nothing of the same class is still active.
 

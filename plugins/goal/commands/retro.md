@@ -75,8 +75,10 @@ change on global evidence.
      implausibly short gap, and a step that contains unattended or
      background phases (a scheduled run, an overnight benchmark matrix)
      reads as an implausibly long one. Flag both rather than averaging
-     them in; when a step carried background work, prefer the PR's own
-     open-to-merge timestamps as the duration evidence.
+     them in. PR open-to-merge spans are review-inclusive calendar time,
+     not work duration — cite one only labeled as such, and never mix it
+     into a before/after adoption comparison unless both sides use the
+     same metric under the same label.
    - Goal-level outcomes and their timing: each goal's `closed` event
      (`done` or `abandoned`) and the elapsed time from its first
      `step-started` to that `closed` event.
