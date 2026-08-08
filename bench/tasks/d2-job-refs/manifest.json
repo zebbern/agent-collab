@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "d2-job-refs",
+  "fixSha": "abfd9aa18899b4174fe7a2ed9aef1a9423574ce0",
+  "parentSha": "59e190cbd8522fe98ac300e55dffe9ba438aac58",
+  "symptomFile": "symptom.md",
+  "groundTruth": {
+    "tests": [
+      { "from": "tests/bench-job-refs.test.mjs", "to": "tests/bench-job-refs.test.mjs" }
+    ],
+    "fixtures": []
+  },
+  "classBonus": {
+    "tests": [
+      { "from": "tests/bench-job-refs-class.test.mjs", "to": "tests/bench-job-refs-class.test.mjs" }
+    ]
+  },
+  "originalStrict": {
+    "transplantFromFix": [
+      "tests/runtime-core.test.mjs",
+      "tests/cursor-runtime.test.mjs"
+    ],
+    "excludeTestNames": [],
+    "caveat": "tests 3-4 pin new wording and cover sibling bugs beyond the symptom"
+  },
+  "regressionSuite": [
+    "tests/runtime-core.test.mjs"
+  ],
+  "driftCheckRequired": true,
+  "timeouts": {
+    "claudeMs": 600000,
+    "testMs": 120000
+  },
+  "budgetUsd": 2,
+  "forbiddenSymptomStrings": [
+    "allowMissing",
+    "bucket",
+    "matchJobReference"
+  ]
+}

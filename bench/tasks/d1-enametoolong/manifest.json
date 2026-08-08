@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "d1-enametoolong",
+  "fixSha": "9619ebe03bd4058d032aa6f17d9850312d048df9",
+  "parentSha": "8a6ea75ca7aca1fcf3dc61f60d3836df4d79c299",
+  "symptomFile": "symptom.md",
+  "groundTruth": {
+    "tests": [
+      { "from": "tests/bench-prompt-transport.test.mjs", "to": "tests/bench-prompt-transport.test.mjs" }
+    ],
+    "fixtures": [
+      { "from": "tests/fake-cursor-agent-bench-fixture.mjs", "to": "tests/fake-cursor-agent-bench-fixture.mjs" }
+    ]
+  },
+  "classBonus": null,
+  "originalStrict": {
+    "transplantFromFix": [
+      "tests/cursor-runtime.test.mjs",
+      "tests/fake-cursor-agent-fixture.mjs"
+    ],
+    "excludeTestNames": [
+      "cursor progress lines carry the [cursor] prefix, not the codex one"
+    ],
+    "caveat": "original fixture reads stdin only — mechanism-pinned; only the stdin fix passes the strict metric"
+  },
+  "regressionSuite": [
+    "tests/cursor-runtime.test.mjs"
+  ],
+  "driftCheckRequired": false,
+  "timeouts": {
+    "claudeMs": 600000,
+    "testMs": 120000
+  },
+  "budgetUsd": 2,
+  "forbiddenSymptomStrings": [
+    "stdin",
+    "argv",
+    "32K",
+    "CreateProcess"
+  ]
+}

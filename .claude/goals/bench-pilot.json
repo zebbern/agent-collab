@@ -25,8 +25,9 @@
       "id": "harness-and-calibration",
       "title": "Bench harness, three resurrection task dirs, and the zero-spend calibrate gate",
       "detail": "Everything except the live claude path, per the approved plan: bench/ tree (run-bench.mjs, aggregate.mjs, lib/{manifest,worktree,transplant,headless,score,telemetry,report}.mjs), three task dirs with bench-owned ground-truth tests (D2 job-refs fix abfd9aa parent 59e190c; D3 eperm-rename fix 8ef4058 parent e906cb5; D1 enametoolong fix 9619ebe parent 8a6ea75 with the stdin-or-file bench fixture), symptom.md files with leak-guards, tests/bench-{manifest,runner,report}.test.mjs (hermetic, injected fakes), .gitignore entry for bench/results/, reap prefixes in scripts/reap-test-residue.mjs. Acceptance: the two command criteria above — bench suites green and --calibrate --all proving RED at every parent and GREEN at every fix with no claude invocation.",
-      "status": "todo",
-      "disposition": null
+      "status": "in-progress",
+      "disposition": null,
+      "startedAt": "2026-08-08T01:09:04.189Z"
     },
     {
       "id": "live-pilot",
@@ -42,5 +43,5 @@
   "status": "active",
   "blockedReason": null,
   "createdAt": "2026-08-08T01:08:54.169Z",
-  "updatedAt": "2026-08-08T01:08:54.169Z"
+  "updatedAt": "2026-08-08T01:09:04.191Z"
 }
