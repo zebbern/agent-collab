@@ -43,11 +43,16 @@ export function buildArmSettings(arm) {
  * truth so a live-run wiring pass in increment 2 cannot silently diverge from
  * what this increment's tests pin.
  */
-export function buildClaudeInvocation({ armSettingsFile, prompt, budgetUsd }) {
+export function buildClaudeInvocation({ armSettingsFile, prompt, budgetUsd, promptViaStdin = false }) {
+  // promptViaStdin drops the positional and the caller pipes the prompt on
+  // stdin instead ("useful for pipes" is -p's documented purpose). The live
+  // runner uses this: symptom text contains quotes and backticks, and this
+  // repo's history is a catalogue of Windows argv-quoting casualties — the
+  // prompt never rides argv.
   return {
     file: "claude",
     args: [
-      "-p", prompt,
+      ...(promptViaStdin ? ["-p"] : ["-p", prompt]),
       "--output-format", "json",
       "--no-session-persistence",
       "--max-budget-usd", String(budgetUsd),
@@ -75,7 +80,13 @@ export function buildRunEnv(baseEnv, { pluginDataDir }) {
       delete env[name];
     }
   }
-  env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  // CLAUDE_PLUGIN_DATA points at a NON-harvested sibling dir: the agent runs
+  // the repo's own parent-era tests, which spawn companions that write job
+  // records under this var — harvesting those read as phantom delegations
+  // (6 false arm-leaks in the first matrix). Real delegations ride the
+  // installed plugins, which honor the *_COMPANION_STATE_ROOT overrides
+  // below — only THOSE dirs are harvested.
+  env.CLAUDE_PLUGIN_DATA = path.join(pluginDataDir, "agent-ambient");
   env.CODEX_COMPANION_STATE_ROOT = path.join(pluginDataDir, "codex-companion");
   env.CURSOR_COMPANION_STATE_ROOT = path.join(pluginDataDir, "cursor-companion");
   env.GOAL_COMPANION_STATE_ROOT = path.join(pluginDataDir, "goal-companion");

@@ -194,7 +194,12 @@ test("buildRunEnv scrubs an ambient-identical session var but preserves a delibe
 
     assert.equal(env.CODEX_COMPANION_SESSION_ID, undefined);
     assert.equal(env.CURSOR_COMPANION_SESSION_ID, "deliberately-set-session");
-    assert.equal(env.CLAUDE_PLUGIN_DATA, pluginDataDir);
+    // CLAUDE_PLUGIN_DATA must point at a NON-harvested sibling of the state
+    // roots: the agent runs the repo's parent-era tests, whose companions key
+    // state off this var — pointing it at a harvested dir produced 6 phantom
+    // arm-leaks in the first live matrix. Only the three *_COMPANION_STATE_ROOT
+    // dirs below are harvested for delegation telemetry.
+    assert.equal(env.CLAUDE_PLUGIN_DATA, path.join(pluginDataDir, "agent-ambient"));
     assert.equal(env.CODEX_COMPANION_STATE_ROOT, path.join(pluginDataDir, "codex-companion"));
     assert.equal(env.CURSOR_COMPANION_STATE_ROOT, path.join(pluginDataDir, "cursor-companion"));
     assert.equal(env.GOAL_COMPANION_STATE_ROOT, path.join(pluginDataDir, "goal-companion"));
