@@ -267,9 +267,14 @@ function executeLiveRun({ repoRoot, tasksDir, taskId, arm, repeat, tmpRoot, keep
     }
     // Phase 2b: the parent's OWN regression suite must be green (before any
     // fix-era transplant, which by design contains failing-at-parent tests).
-    const baseline = runSuiteAt(worktree.path, manifest.regressionSuite, manifest.timeouts.testMs, testEnv);
+    let baseline = runSuiteAt(worktree.path, manifest.regressionSuite, manifest.timeouts.testMs, testEnv);
     if (baseline.status !== 0) {
-      return { ...record, status: "invalid-baseline", detail: "parent regression suite not green pre-run", finishedAt: new Date().toISOString() };
+      // Same load-flake mitigation as the post-run check: retry once, settled.
+      settle();
+      baseline = runSuiteAt(worktree.path, manifest.regressionSuite, manifest.timeouts.testMs, testEnv);
+    }
+    if (baseline.status !== 0) {
+      return { ...record, status: "invalid-baseline", detail: "parent regression suite not green pre-run (after one settled retry)", finishedAt: new Date().toISOString() };
     }
     // Phase 2c: originals from the fix, pre-fix TAP baseline for newlyPassing.
     transplantFromFix(repoRoot, manifest.fixSha, manifest.originalStrict.transplantFromFix, worktree.path);
@@ -366,13 +371,21 @@ function executeLiveRun({ repoRoot, tasksDir, taskId, arm, repeat, tmpRoot, keep
 
     // Phase 6: telemetry + the arm-validity check. harvestJobs returns
     // { jobs, totalTokens } — the smoke run caught this shape being misread.
-    const harvest = harvestJobs(pluginDataDir);
+    const harvest = {
+      jobs: ["codex-companion", "cursor-companion", "goal-companion"].flatMap(
+        (root) => harvestJobs(path.join(pluginDataDir, root)).jobs
+      ),
+      totalTokens: 0
+    };
+    harvest.totalTokens = ["codex-companion", "cursor-companion", "goal-companion"].reduce(
+      (sum, root) => sum + harvestJobs(path.join(pluginDataDir, root)).totalTokens, 0
+    );
     record.delegation = harvest;
-    if (live.timedOut) {
-      return { ...record, status: "timeout", finishedAt: new Date().toISOString() };
-    }
     if (arm === "solo" && harvest.jobs.length > 0) {
       return { ...record, status: "invalid-arm-leak", detail: `solo arm harvested ${harvest.jobs.length} delegated job(s); plugin gating failed`, finishedAt: new Date().toISOString() };
+    }
+    if (live.timedOut) {
+      return { ...record, status: "timeout", finishedAt: new Date().toISOString() };
     }
     return { ...record, status: "complete", finishedAt: new Date().toISOString() };
   } catch (error) {
