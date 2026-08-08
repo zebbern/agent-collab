@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "slug": "bench-pilot",
+  "statement": "First controlled experiment on the orchestration layer itself: a resurrection benchmark built from this repo's own defect history (pre-fix checkout, symptom-only prompt, mechanical ground-truth scoring), comparing solo Claude vs Claude+codex-delegation. Approved plan: C:/Users/zeb/.claude/plans/plan-for-what-you-quizzical-stonebraker.md.",
+  "acceptanceCriteria": [
+    {
+      "kind": "command",
+      "run": "node --test tests/bench-manifest.test.mjs tests/bench-runner.test.mjs tests/bench-report.test.mjs",
+      "expect": "exit0",
+      "timeoutMs": 600000
+    },
+    {
+      "kind": "command",
+      "run": "node bench/run-bench.mjs --calibrate --all",
+      "expect": "exit0",
+      "timeoutMs": 900000
+    },
+    {
+      "kind": "manual",
+      "text": "Live pilot: every task::arm cell holds >=2 valid runs and the aggregate report says so honestly, or the failure is recorded as-is in docs/"
+    }
+  ],
+  "backlog": [
+    {
+      "id": "harness-and-calibration",
+      "title": "Bench harness, three resurrection task dirs, and the zero-spend calibrate gate",
+      "detail": "Everything except the live claude path, per the approved plan: bench/ tree (run-bench.mjs, aggregate.mjs, lib/{manifest,worktree,transplant,headless,score,telemetry,report}.mjs), three task dirs with bench-owned ground-truth tests (D2 job-refs fix abfd9aa parent 59e190c; D3 eperm-rename fix 8ef4058 parent e906cb5; D1 enametoolong fix 9619ebe parent 8a6ea75 with the stdin-or-file bench fixture), symptom.md files with leak-guards, tests/bench-{manifest,runner,report}.test.mjs (hermetic, injected fakes), .gitignore entry for bench/results/, reap prefixes in scripts/reap-test-residue.mjs. Acceptance: the two command criteria above — bench suites green and --calibrate --all proving RED at every parent and GREEN at every fix with no claude invocation.",
+      "status": "todo",
+      "disposition": null
+    },
+    {
+      "id": "live-pilot",
+      "title": "Smoke run, then the 18-run solo-vs-codex matrix, then the committed report",
+      "detail": "Wire runHeadlessClaude + telemetry harvest; --smoke (d3, solo, 1 repeat) first to burn down harness bugs; then 3 tasks x {solo, codex} x 3 repeats sequentially with the approved caps (10-min wall, $2 budget, settings-file plugin gating, scrubbed env, per-run state roots, main-repo fingerprint). Aggregate with the min-samples floor and cost-honesty columns (claude_cost_usd measurable-flagged; delegated tokens never priced). Commit the JSONL snapshot + aggregate as docs/bench-pilot-2026-08-08.md including the caveat block. Arm validity: at least one solo record with zero delegated jobs and one codex record with >=1.",
+      "status": "todo",
+      "disposition": null
+    }
+  ],
+  "budget": {
+    "perStepDelegations": 2
+  },
+  "status": "active",
+  "blockedReason": null,
+  "createdAt": "2026-08-08T01:08:54.169Z",
+  "updatedAt": "2026-08-08T01:08:54.169Z"
+}
