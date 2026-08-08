@@ -38,16 +38,21 @@
       "id": "live-pilot",
       "title": "Smoke run, then the 18-run solo-vs-codex matrix, then the committed report",
       "detail": "Wire runHeadlessClaude + telemetry harvest; --smoke (d3, solo, 1 repeat) first to burn down harness bugs; then 3 tasks x {solo, codex} x 3 repeats sequentially with the approved caps (10-min wall, $2 budget, settings-file plugin gating, scrubbed env, per-run state roots, main-repo fingerprint). Aggregate with the min-samples floor and cost-honesty columns (claude_cost_usd measurable-flagged; delegated tokens never priced). Commit the JSONL snapshot + aggregate as docs/bench-pilot-2026-08-08.md including the caveat block. Arm validity: at least one solo record with zero delegated jobs and one codex record with >=1.",
-      "status": "in-progress",
-      "disposition": null,
+      "status": "merged",
+      "disposition": {
+        "recordedAt": "2026-08-08T22:04:12.407Z",
+        "pr": 45,
+        "delegate": "none",
+        "notes": "18-run matrix under approved caps. d3 comparable: both arms 3/3 primary, solo ~30% faster; d1/d2 honestly UNCOMPARABLE (cap-bound / baseline-flaked). Three live-found confounds fixed (phantom-delegation harvest split, arm-leak check ordering, baseline settled retry). Report + records snapshot in docs/."
+      },
       "startedAt": "2026-08-08T01:49:08.193Z"
     }
   ],
   "budget": {
     "perStepDelegations": 2
   },
-  "status": "active",
+  "status": "done",
   "blockedReason": null,
   "createdAt": "2026-08-08T01:08:54.169Z",
-  "updatedAt": "2026-08-08T01:49:08.194Z"
+  "updatedAt": "2026-08-08T22:05:22.437Z"
 }
