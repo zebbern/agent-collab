@@ -54,6 +54,14 @@ change on global evidence.
 3. **Honesty floor.** Count the ledger's `disposition` events at the scope
    you are running. If there are fewer than 5, say the ledger is too thin
    for conclusions and stop — no vibes-based findings, no partial proposal.
+   Before trusting the count either way, cross-check it against the goal
+   files' recorded dispositions: if the ledger sees materially fewer than
+   the goal files carry, the ledger view is local — a split or unmigrated
+   state root — and a verdict computed from a shard is wrong even when the
+   refusal itself is procedurally correct. Say which view disagreed and
+   stop. (Precedent: the 2026-08-07 portfolio retro recorded
+   `dispositions=1` while the goal files carried 9 — a split-state shard,
+   later unified by the canonical-root ledger migration.)
 4. Cross-reference every recorded PR number against reality: `git log` and
    `gh pr view <n>` (or `gh pr list`) for the branch/merge history — a
    disposition of `merged` whose PR number the repo does not actually show
@@ -62,9 +70,15 @@ change on global evidence.
    - Dispositions grouped by `delegate` (codex / cursor / none) — merge rate,
      block rate. In portfolio scope, also grouped by goal.
    - Elapsed time between each item's `step-started` event and its matching
-     `disposition` event — and whether that duration is trustworthy (work
-     started before `start` was called reads as an implausibly short gap;
-     flag it rather than averaging it in).
+     `disposition` event — and whether that duration is trustworthy. Both
+     extremes lie: work started before `start` was called reads as an
+     implausibly short gap, and a step that contains unattended or
+     background phases (a scheduled run, an overnight benchmark matrix)
+     reads as an implausibly long one. Flag both rather than averaging
+     them in. PR open-to-merge spans are review-inclusive calendar time,
+     not work duration — cite one only labeled as such, and never mix it
+     into a before/after adoption comparison unless both sides use the
+     same metric under the same label.
    - Goal-level outcomes and their timing: each goal's `closed` event
      (`done` or `abandoned`) and the elapsed time from its first
      `step-started` to that `closed` event.
