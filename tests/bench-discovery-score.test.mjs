@@ -167,3 +167,15 @@ test("adjudicated-real ALT is reported alongside FIND, never folded into it", ()
 test("DISCOVERY_OUTCOMES is exactly the five buckets the design argues for", () => {
   assert.deepEqual([...DISCOVERY_OUTCOMES].sort(), ["ALT", "FIND", "HARNESS-FAIL", "JUNK", "MISS"]);
 });
+
+test("a PoC that destroyed its own coverage artifact scores JUNK, not HARNESS-FAIL", () => {
+  // Closes a measured escape hatch: exiting early leaves no artifact, and
+  // charging that to the harness would let any submission opt out of the
+  // witness for free.
+  const result = scoreDiscoveryRun({
+    legs: legs(),
+    witness: { covered: false, destroyedByPoc: true, reason: "the PoC ran but left no coverage artifact" }
+  });
+  assert.equal(result.outcome, "JUNK");
+  assert.match(result.reason, /left no coverage artifact/);
+});

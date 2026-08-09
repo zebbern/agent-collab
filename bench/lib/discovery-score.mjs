@@ -91,6 +91,19 @@ export function scoreDiscoveryRun({ legs, witness }) {
 
   // 3. The witness. A failure to COLLECT it is the harness's fault; a run that
   //    demonstrably never entered the vulnerable code is the submission's.
+  // A PoC that destroyed its own measurement is charged to the submission, not
+  // to the harness. Otherwise exiting early is a free escape hatch out of the
+  // witness — measured: os._exit(0) before the tracer flushes leaves no
+  // artifact, and a crashing PoC reaches the same state by accident.
+  if (witness?.destroyedByPoc) {
+    return {
+      outcome: "JUNK",
+      reason:
+        witness.reason ??
+        "the PoC ran but left no coverage artifact, so its claim cannot be distinguished from one that executed nothing",
+      detail
+    };
+  }
   if (witness?.unavailable) {
     return {
       outcome: "HARNESS-FAIL",

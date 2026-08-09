@@ -91,3 +91,20 @@ test("buildWitnessPlan refuses to build an unenforceable plan", () => {
   assert.throws(() => buildWitnessPlan({ poc: {}, witness: { command: "x" } }), /poc\.entryPath/);
   assert.throws(() => buildWitnessPlan({ poc: { entryPath: "x" }, witness: {} }), /witness\.command/);
 });
+
+test("a PoC that ran but left no artifact is charged to the submission, not the harness", () => {
+  // Measured attack: os._exit(0) before the tracer flushes destroys the
+  // coverage file. Reporting that as a harness failure would hand every
+  // submission a free escape hatch out of the witness — and a merely crashing
+  // PoC reaches the same state by accident.
+  const destroyed = parseWitnessReport({ artifactMissing: true, pocRan: true }, TARGETS);
+  assert.equal(destroyed.covered, false);
+  assert.equal(destroyed.destroyedByPoc, true);
+  assert.equal(destroyed.unavailable, undefined, "must NOT be reported as a harness failure");
+  assert.match(destroyed.reason, /exited before the tracer flushed/);
+
+  // But if the PoC never ran at all, nothing is the submission's fault.
+  const neverRan = parseWitnessReport({ artifactMissing: true, pocRan: false }, TARGETS);
+  assert.match(neverRan.unavailable, /never ran/);
+  assert.equal(neverRan.destroyedByPoc, undefined);
+});

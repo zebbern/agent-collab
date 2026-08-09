@@ -49,6 +49,31 @@ export function parseWitnessReport(report, mustCover) {
     return { covered: false, missing: [], unavailable: "the task declares no mustCover targets" };
   }
 
+  // MEASURED ATTACK, and the sharpest practical weakness found in the witness:
+  // a PoC that calls os._exit(0) before the tracer flushes leaves no coverage
+  // artifact at all. That surfaces as "unavailable", which would otherwise be a
+  // HARNESS failure and therefore a free non-verdict — an agent could switch
+  // the gate off by exiting early, and a merely CRASHING PoC finds the same
+  // escape hatch by accident.
+  //
+  // So the two cases are separated by WHO failed. If the PoC ran (we have its
+  // exit code) but produced no artifact, that is the submission's doing: a
+  // legitimate PoC under instrumentation always leaves one. Only the measuring
+  // TOOLING breaking is a harness failure.
+  if (report?.artifactMissing) {
+    if (report?.pocRan) {
+      return {
+        covered: false,
+        missing: targets,
+        destroyedByPoc: true,
+        reason:
+          "the PoC ran but left no coverage artifact — it exited before the tracer flushed, " +
+          "which destroys the measurement rather than failing it"
+      };
+    }
+    return { covered: false, missing: targets, unavailable: "no coverage artifact and the PoC never ran" };
+  }
+
   if (report?.error) {
     return { covered: false, missing: targets, unavailable: `witness command failed to run: ${report.error}` };
   }
