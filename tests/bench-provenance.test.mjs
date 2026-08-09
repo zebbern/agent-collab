@@ -99,47 +99,65 @@ test("assertProvenance names the leg, because an anonymous drift report is usele
 
 const AUDIT_SCOPE = ["audited.js"];
 
-function leg(name, role, auditedHash) {
-  return { name, role, provenance: { fileHashes: { "audited.js": auditedHash } } };
+function leg(name, role, auditedHash, outsideRegionHash) {
+  return {
+    name,
+    role,
+    provenance: { fileHashes: { "audited.js": auditedHash } },
+    ...(outsideRegionHash === undefined ? {} : { outsideRegionHash })
+  };
 }
 
-test("a well-formed leg set passes: fix-shaped legs edit the audited region, chokepoint legs do not", () => {
+test("the canary's real shape passes: chokepoint legs edit the audited FILE but match each other outside the region", () => {
+  // Measured on aiohttp, where the chokepoint lives inside the audited file:
+  // every leg's file hash differs from the parent's, and the property that
+  // carries the invariant is camo == decoy-c OUTSIDE the region.
   const result = verifyLegFingerprints(
     [
-      leg("parent", "parent", "aaa"),
-      leg("minimal", "minimal", "bbb"),
-      leg("decoy", "decoy", "ccc"),
-      leg("camo", "camo", "aaa"),
-      leg("decoy-c", "decoy-c", "aaa")
+      leg("parent", "parent", "aaa", "OUT-parent"),
+      leg("minimal", "minimal", "bbb", "OUT-parent"),
+      leg("decoy", "decoy", "ccc", "OUT-parent"),
+      leg("camo", "camo", "ddd", "OUT-choke"),
+      leg("decoy-c", "decoy-c", "eee", "OUT-choke")
     ],
     AUDIT_SCOPE
   );
-  assert.deepEqual(result, { ok: true, problems: [] });
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.ok, true);
 });
 
-test("a camo that touches the audited region is refused — it silently removes its own pair", () => {
+test("a camo separable from every decoy-c outside the audited region is refused", () => {
+  const result = verifyLegFingerprints(
+    [
+      leg("parent", "parent", "aaa", "OUT-parent"),
+      leg("minimal", "minimal", "bbb", "OUT-parent"),
+      leg("decoy", "decoy", "ccc", "OUT-parent"),
+      leg("camo", "camo", "ddd", "OUT-camo-only"),
+      leg("decoy-c", "decoy-c", "eee", "OUT-different")
+    ],
+    AUDIT_SCOPE
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.problems[0], /no decoy-c that matches it outside the audited region/);
+  assert.match(result.problems[0], /tree-delta or chokepoint oracle/);
+});
+
+test("a missing outsideRegionHash is reported as UNVERIFIED, never as verified", () => {
+  // An unverifiable pairing is not a verified one; silence here would be the
+  // same silent-negative class this project keeps being bitten by.
   const result = verifyLegFingerprints(
     [
       leg("parent", "parent", "aaa"),
       leg("minimal", "minimal", "bbb"),
       leg("decoy", "decoy", "ccc"),
       leg("camo", "camo", "ddd"),
-      leg("decoy-c", "decoy-c", "aaa")
+      leg("decoy-c", "decoy-c", "eee")
     ],
     AUDIT_SCOPE
   );
-  assert.equal(result.ok, false);
-  assert.match(result.problems[0], /leg "camo" \(camo\) must leave the audited region byte-identical/);
-  assert.match(result.problems[0], /removes the pair/);
-});
-
-test("a decoy-c that touches the audited region is refused for the same reason", () => {
-  const result = verifyLegFingerprints(
-    [leg("parent", "parent", "aaa"), leg("minimal", "minimal", "bbb"), leg("decoy-c", "decoy-c", "zzz")],
-    AUDIT_SCOPE
-  );
-  assert.equal(result.ok, false);
-  assert.match(result.problems[0], /leg "decoy-c"/);
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.unverified.length, 1);
+  assert.match(result.unverified[0], /no outsideRegionHash; its pairing could not be verified/);
 });
 
 test("a minimal or decoy leg that does NOT edit the audited region is refused", () => {

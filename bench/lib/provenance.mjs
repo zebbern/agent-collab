@@ -99,25 +99,40 @@ export function assertProvenance(actual, expected, legName) {
 /**
  * The structural check that makes the paired contract mean anything.
  *
- * A camo (and its decoy-c twin) close/leave-open the flaw from OUTSIDE the
- * audited region — so their audited bytes must be IDENTICAL to the parent's.
- * If a camo accidentally touches the audited region, a static oracle can see
- * it, and the pair it was supposed to form silently stops existing.
+ * CORRECTED after a measurement. The first version compared each leg's audited
+ * bytes against the PARENT's and demanded that camo/decoy-c match. That is
+ * wrong whenever the chokepoint lives in the same file the agent audits — on
+ * the corpus's canary task both the camo and its decoy-c act inside
+ * `http_parser.py`, which *is* an audit-scope file, so every leg's file hash
+ * differs from the parent's and a whole-file rule either fires spuriously or
+ * passes vacuously.
  *
- * Conversely a minimal patch and its decoy twin edit the audited region by
- * definition — one that does not is not doing its job either.
+ * The property that actually carries the invariant is PAIRWISE and applies
+ * outside the audited region: a camo and its decoy-c twin must be
+ * INDISTINGUISHABLE THERE. Measured on the canary: with the framing block
+ * excised, camo and decoy-c hash identically while parent/minimal/decoy share a
+ * different hash. That equality is what stops a tree-delta or chokepoint oracle
+ * separating the pair.
  *
- * Both directions were violated in practice during task hardening, which is
- * why this is a mechanical check and not a review instruction.
+ * Callers supply `outsideRegionHash` per leg (a digest of the tree with the
+ * audited region excised — the task's own hardening produces it). When it is
+ * absent the check reports what it could not verify rather than passing
+ * silently: an unverifiable pairing is not a verified one.
  *
- * @param {Array<{name: string, role: string, provenance: {fileHashes: object}}>} legs
+ * The minimal/decoy direction is unchanged and still file-granular, because a
+ * patch that fails to apply leaves the parent in place and every downstream
+ * number becomes the parent measured twice.
+ *
+ * @param {Array<{name: string, role: string, provenance: {fileHashes: object},
+ *   outsideRegionHash?: string}>} legs
  * @param {string[]} auditScope paths the agent is pointed at
  */
 export function verifyLegFingerprints(legs, auditScope) {
   const problems = [];
+  const unverified = [];
   const parent = (legs ?? []).find((leg) => leg.role === "parent");
   if (!parent) {
-    return { ok: false, problems: ["no parent leg to compare against"] };
+    return { ok: false, problems: ["no parent leg to compare against"], unverified };
   }
 
   const auditedOf = (leg) =>
@@ -125,25 +140,38 @@ export function verifyLegFingerprints(legs, auditScope) {
   const parentAudited = auditedOf(parent);
 
   for (const leg of legs ?? []) {
-    if (leg.role === "parent") {
-      continue;
-    }
-    const audited = auditedOf(leg);
-    const identical = audited === parentAudited;
-
-    if ((leg.role === "camo" || leg.role === "decoy-c") && !identical) {
-      problems.push(
-        `leg "${leg.name}" (${leg.role}) must leave the audited region byte-identical to the parent — ` +
-          "it fixes or fakes from outside it. Touching audited bytes lets a static oracle separate " +
-          "this leg from its twin, which removes the pair"
-      );
-    }
-    if ((leg.role === "minimal" || leg.role === "decoy") && identical) {
+    if ((leg.role === "minimal" || leg.role === "decoy") && auditedOf(leg) === parentAudited) {
       problems.push(
         `leg "${leg.name}" (${leg.role}) has audited bytes identical to the parent — it is supposed ` +
-          "to edit the audited region, so as built it is not exercising anything"
+          "to edit the audited region, so as built it is not exercising anything (a patch that " +
+          "silently failed to apply looks exactly like this)"
       );
     }
   }
-  return { ok: problems.length === 0, problems };
+
+  // Pairwise: every flaw-CLOSED chokepoint leg needs a flaw-LIVE twin it is
+  // indistinguishable from outside the audited region.
+  const camos = (legs ?? []).filter((leg) => leg.role === "camo");
+  const decoyCs = (legs ?? []).filter((leg) => leg.role === "decoy-c");
+  for (const camo of camos) {
+    if (camo.outsideRegionHash === undefined) {
+      unverified.push(`leg "${camo.name}" (camo) has no outsideRegionHash; its pairing could not be verified`);
+      continue;
+    }
+    const twins = decoyCs.filter((twin) => twin.outsideRegionHash === camo.outsideRegionHash);
+    if (twins.length === 0) {
+      const withHashes = decoyCs.filter((twin) => twin.outsideRegionHash !== undefined);
+      if (withHashes.length === 0) {
+        unverified.push(`leg "${camo.name}" (camo) has no decoy-c carrying an outsideRegionHash to compare against`);
+        continue;
+      }
+      problems.push(
+        `leg "${camo.name}" (camo) has no decoy-c that matches it outside the audited region — ` +
+          "the pair is separable there, so a tree-delta or chokepoint oracle can tell them apart " +
+          "and the pairing invariant is not actually in force"
+      );
+    }
+  }
+
+  return { ok: problems.length === 0, problems, unverified };
 }
