@@ -44,14 +44,41 @@ estimates are noise and the scouting protocol should stop emitting them.
 - Weak config: strictly lower on at least 2 of 4 tasks, or the two
   configurations are not separable and the design has failed.
 
-### 3. Delegation
+### 3. Delegation — REMOVED FROM THIS PILOT (measured 2026-08-09)
 
-**Prediction: no measurable delegation benefit on FIND rate at this sample
-size.** The resurrection pilot found none on its one comparable task, and n=3
-per cell cannot resolve less than roughly a 30-point difference. A *directional*
-signal favouring delegation on the two tasks whose difficulty is concentrated
-in exploit construction (Jenkins, go-git) would be interesting but not
-significant, and must be reported as such.
+The pilot runs **solo-only**. The delegation arm was cut before any run, for a
+measured reason rather than a scoping one.
+
+**Codex has live web search that cannot be disabled.** Probed three ways:
+- our companion never passes `--search`, yet a delegation searched and returned
+  a live NVD URL;
+- `-c tools.web_search=false` is a *recognised* config key (it survives
+  `--strict-config`) and is *ineffective* — the run still searched;
+- a **clean `CODEX_HOME`** with no plugins, no skills, no MCP servers and an
+  explicit `[tools] web_search = false` **still searched**.
+
+Because the search executes server-side, container network isolation cannot
+block it: the query runs on the provider's infrastructure and the results
+return through the allowlisted API connection. The egress boundary this bench
+proved out is powerless against it.
+
+The corpus being post-cutoff defends against the delegate *remembering* a CVE.
+Nothing defends against it *looking one up mid-run*. A delegation win would
+therefore have been unattributable between "the orchestration helped it reason"
+and "the delegate searched NVD" — so it would not have been a discovery
+measurement at all.
+
+**What survives.** "Delegation with live lookup versus solo without" remains a
+legitimate question about the system as people actually use it, and it is
+separately measurable: the companion's event stream emits `web search: <query>`
+lines, so contaminated runs are detectable and can be reported as their own
+category. It is simply not a *discovery* comparison and must never be reported
+as one.
+
+**Standing requirement for any future arm:** probe the delegate for (a) its
+training cutoff, (b) live search capability, and (c) recognition of the
+specific advisories — before it is allowed into a scored condition. Cursor has
+not been probed; it must be, before any cursor arm is added.
 
 ### 4. What I expect to go wrong
 
