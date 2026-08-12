@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 // The pre-merge gate, run locally.
 //
-// GitHub Actions dispatch is intermittent for this repo (a single day has
-// seen it both work and silently fail), so this script is the gate rather
-// than a convenience wrapper — CI availability is not something a merge gate
-// may assume. The Linux leg runs in docker where the win32-guarded tests
+// This local gate is independent of the complementary protected GitHub check:
+// it catches failures before push and reproduces Linux even if CI is delayed
+// or unavailable. The Linux leg runs in docker where the win32-guarded tests
 // actually execute (the Windows run skips ~40 of them), so the two legs
 // together cover more than either platform alone.
 //
-//   npm run verify              # build + native suite + Linux suite in docker
-//   npm run verify -- --no-linux  # skip the docker leg deliberately
+//   npm run verify              # version metadata + build + native + Linux
+//   npm run verify:no-linux     # skip the docker leg deliberately (exits 2)
 //
 // Reporting rule: a skipped leg is never reported as a pass. If the Linux leg
 // cannot run, the summary says UNVERIFIED and the gate is INCOMPLETE — the
@@ -19,6 +18,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+
+import { exitCodeForVerifyResults } from "./verify-result.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skipLinux = process.argv.includes("--no-linux");
@@ -62,6 +63,7 @@ function settle(seconds = 5) {
 }
 
 const results = [];
+results.push(run("version metadata", "npm", ["run", "check-version"]));
 results.push(run("build (types + tsc checkJs)", "npm", ["run", "build"]));
 results.push(run(`native suite (${process.platform})`, process.execPath, [path.join(ROOT, "scripts", "run-tests.mjs")]));
 settle();
@@ -101,7 +103,11 @@ if (skipLinux) {
         // directory and is included: tests/bench-manifest.test.mjs verifies
         // historical fix/parent SHAs and needs the object DB, so "no test
         // needs the repo's git history" stopped being true on 2026-08-08.
-        `mkdir /work && tar -C /repo ${fs.statSync(path.join(ROOT, ".git")).isDirectory() ? "" : "--exclude=./.git "}-cf - . | tar -C /work -xf - && ` +
+        // The Linux leg executes only repository Node/relative imports and
+        // fake CLIs. Excluding host node_modules avoids copying the pinned
+        // platform-specific Codex binary (hundreds of MB) into a test-only
+        // container where it is neither compatible nor used.
+        `mkdir /work && tar -C /repo --exclude=./node_modules ${fs.statSync(path.join(ROOT, ".git")).isDirectory() ? "" : "--exclude=./.git "}-cf - . | tar -C /work -xf - && ` +
           "cd /work && node scripts/run-tests.mjs > /tmp/suite.log 2>&1; status=$?; " +
           "grep -E '^not ok' /tmp/suite.log; grep -E '^# (tests|pass|fail|skipped)' /tmp/suite.log; exit $status"
       ],
@@ -110,8 +116,7 @@ if (skipLinux) {
   );
 }
 
-const failed = results.filter((r) => r.status === "fail" || r.status === "error");
-const skipped = results.filter((r) => r.status === "skipped");
+const exitCode = exitCodeForVerifyResults(results);
 
 process.stdout.write("\n=== verify summary ===\n");
 for (const result of results) {
@@ -119,13 +124,13 @@ for (const result of results) {
   process.stdout.write(`  ${mark.padEnd(11)} ${result.label} (${result.detail})\n`);
 }
 
-if (failed.length > 0) {
+if (exitCode === 1) {
   process.stdout.write("\nGate: FAILED\n");
-  process.exit(1);
+  process.exit(exitCode);
 }
-if (skipped.length > 0) {
-  // Not a failure, but never call an unrun leg a pass.
+if (exitCode === 2) {
+  // Keep incomplete distinct from a failed leg, but non-zero for automation.
   process.stdout.write("\nGate: INCOMPLETE — some legs were not verified (see UNVERIFIED above).\n");
-  process.exit(0);
+  process.exit(exitCode);
 }
 process.stdout.write("\nGate: PASSED (all legs verified)\n");

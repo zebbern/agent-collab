@@ -11,9 +11,9 @@ import { spawn } from "node:child_process";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, run } from "./helpers.mjs";
-import { enqueueBackgroundTask, handleTaskWorker } from "../plugins/codex/scripts/codex-companion.mjs";
+import { enqueueBackgroundTask, handleTaskWorker, persistTaskAppServerCleanupOutcome } from "../plugins/codex/scripts/codex-companion.mjs";
 import { loadBrokerChildren } from "../plugins/codex/scripts/lib/broker-ownership.mjs";
-import { loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { ensureBrokerSession, loadBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { listJobs, resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
@@ -80,6 +80,46 @@ test("background task is persisted before its worker can start", () => {
   assert.equal(indexedJob.phase, workerProgress.phase);
   assert.equal(indexedJob.pid, workerProgress.pid);
   assert.equal(indexedJob.progressMarker, workerProgress.progressMarker);
+});
+
+test("a stale app-server close callback cannot overwrite verified cancel cleanup", () => {
+  const workspace = makeTempDir();
+  const verified = { attempted: true, delivered: true, verified: true, method: "taskkill" };
+  const job = {
+    id: "task-close-after-cancel",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    appServerPid: 43211,
+    appServerProcessIdentity: "43211@win32:123456789",
+    appServerCleanupOutcome: verified,
+    cleanupFailure: null,
+    createdAt: "2026-07-28T08:00:30.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  persistTaskAppServerCleanupOutcome(workspace, job.id, {
+    attempted: false,
+    delivered: false,
+    verified: false,
+    degraded: true,
+    method: "identity-check"
+  });
+
+  const indexed = listJobs(workspace).find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(workspace, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cancelled");
+    assert.equal(record.appServerCleanupOutcome.verified, true);
+    assert.equal(record.cleanupFailure, null);
+  }
 });
 
 test("background task marks the queued record failed when worker spawn throws", () => {
@@ -317,6 +357,37 @@ test("task-resume-candidate returns the latest rescue thread from the current se
   assert.equal(payload.sessionId, "sess-current");
   assert.equal(payload.candidate.id, "task-current");
   assert.equal(payload.candidate.threadId, "thr_current");
+});
+
+test("task-resume-candidate excludes a terminal task with unresolved cleanup", () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-cleanup-pending",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionId: "sess-current",
+    status: "failed",
+    phase: "cleanup-pending",
+    threadId: "thr_cleanup_pending",
+    cleanupFailure: "direct app-server cleanup is unverified",
+    appServerCleanupOutcome: { verified: false },
+    createdAt: "2026-07-28T08:06:30.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  const env = {
+    ...process.env,
+    CODEX_COMPANION_SESSION_ID: "sess-current"
+  };
+
+  const candidate = run("node", [SCRIPT, "task-resume-candidate", "--json"], {
+    cwd: workspace,
+    env
+  });
+  assert.equal(candidate.status, 0, candidate.stderr);
+  assert.equal(JSON.parse(candidate.stdout).available, false);
 });
 
 test("task --resume-last does not resume a task from another Claude session", () => {
@@ -938,10 +1009,100 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(resultPayload.job.id, launchPayload.jobId);
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+  assert.equal(resultPayload.storedJob.appServerCleanupOutcome?.verified, true);
   // The resolved profile defaults (not raw "deep") must survive the
   // background enqueue -> worker -> stored result round trip.
   assert.equal(resultPayload.storedJob.result.model, "gpt-5.6-sol");
   assert.equal(resultPayload.storedJob.result.effort, "xhigh");
+});
+
+test("a background task uses direct transport and survives its launching SessionEnd", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix shared-broker lifecycle is required for this contract.");
+    return;
+  }
+
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "slow-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = withBrokerOwner(buildEnv(binDir), "persistent-background");
+  const brokerSession = await ensureBrokerSession(repo, { env });
+  if (!brokerSession) {
+    t.skip("broker socket unavailable in this sandbox");
+    return;
+  }
+  assert.equal(brokerSession.registry?.registered, true);
+  assert.equal(loadBrokerSession(repo)?.pid, brokerSession.pid);
+
+  let jobId = null;
+  t.after(() => {
+    if (jobId) {
+      run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+    }
+    run("node", [SESSION_HOOK, "SessionEnd"], {
+      cwd: repo,
+      env,
+      input: JSON.stringify({
+        hook_event_name: "SessionEnd",
+        session_id: env.CODEX_COMPANION_SESSION_ID,
+        cwd: repo
+      })
+    });
+  });
+
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "finish after SessionEnd"], {
+    cwd: repo,
+    env
+  });
+  if (launched.status === 0) {
+    jobId = JSON.parse(launched.stdout).jobId;
+  }
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.ok(jobId);
+
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      session_id: env.CODEX_COMPANION_SESSION_ID,
+      cwd: repo
+    })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+  assert.equal(loadBrokerSession(repo), null);
+
+  const nextSessionEnv = {
+    ...env,
+    CODEX_COMPANION_SESSION_ID: "runtime-persistent-background-next"
+  };
+  const waited = run("node", [SCRIPT, "status", jobId, "--wait", "--timeout-ms", "45000", "--json"], {
+    cwd: repo,
+    env: nextSessionEnv
+  });
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).job.status, "completed", waited.stdout);
+
+  const status = run("node", [SCRIPT, "status", "--json"], {
+    cwd: repo,
+    env: nextSessionEnv
+  });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).latestFinished?.id, jobId);
+
+  const result = run("node", [SCRIPT, "result", "--json"], {
+    cwd: repo,
+    env: nextSessionEnv
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const resultPayload = JSON.parse(result.stdout);
+  assert.equal(resultPayload.job.id, jobId);
+  assert.equal(resultPayload.storedJob.result.transport, "direct");
 });
 
 test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {

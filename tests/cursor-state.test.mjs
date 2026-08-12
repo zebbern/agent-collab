@@ -82,7 +82,8 @@ test("a stale snapshot save cannot resurrect a cancelled job", () => {
   upsertJob(workspace, { id: "task-race", status: "cancelled", pid: null });
 
   const staleJob = staleSnapshot.jobs.find((job) => job.id === "task-race");
-  staleJob.phase = "verifying";
+  staleJob.status = "completed";
+  staleJob.phase = "done";
   saveState(workspace, staleSnapshot);
 
   const finalJob = listJobs(workspace).find((job) => job.id === "task-race");
@@ -90,10 +91,11 @@ test("a stale snapshot save cannot resurrect a cancelled job", () => {
   assert.equal(finalJob.pid ?? null, null);
 });
 
-test("upsertJob refuses to revive a terminal job", () => {
+test("upsertJob keeps cancellation authoritative over later transitions", () => {
   const workspace = makeTempDir();
   upsertJob(workspace, { id: "task-terminal", status: "cancelled", pid: null });
   upsertJob(workspace, { id: "task-terminal", status: "running", pid: 5151, phase: "starting" });
+  upsertJob(workspace, { id: "task-terminal", status: "completed", pid: null, phase: "done" });
 
   const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
   assert.equal(job.status, "cancelled");

@@ -148,7 +148,7 @@ You can also just ask: *"Ask Codex to redesign the database connection to be mor
 | Profile | Model | Effort |
 | --- | --- | --- |
 | `deep` | `gpt-5.6-sol` | `xhigh` |
-| `fast` | `gpt-5.3-codex-spark` (same target as `--model spark`) | unset (Codex's default) |
+| `fast` | `gpt-5.3-codex-spark` (same target as `--model spark`) | `medium` |
 
 Precedence: `--profile` supplies the defaults; an explicit `--model` on the same invocation overrides the profile's model, and an explicit `--effort` overrides the profile's effort — independently, so `--profile deep --model gpt-5.4-mini` keeps the `deep` profile's `xhigh` effort with a different model. No `--profile` and no explicit flags behaves exactly as before: Codex's own defaults apply.
 
@@ -262,13 +262,41 @@ Cursor defaults to **`auto`** (its server-side router). Pin one per invocation w
   - The plugin fingerprints the working tree around each review and
     **reports git-visible changes** the agent made. This is the real signal,
     and it does not cover git-ignored files (e.g. `.env`, build output).
-  Write mode is opt-in per task (`--write`).
+  Tasks are not sandboxed either: Cursor can modify files even without
+  `--write`, and task runs have no workspace-drift check. `--write` only
+  removes Cursor's per-command confirmation by adding `--force`; use it only
+  when the user clearly requested edits.
 - Cancel **proves ownership before killing anything**: workers persist a process identity at start (Unix start-time identity, or `(pid, CreationDate)` on Windows), a stale or reused PID is never killed, and a job with no recorded proof fails closed as `cleanup-pending`.
 - On WSL, cancel reaps the Linux-side agent **inside the distro first** (verifying `/proc` cmdline before signalling, TERM→KILL), because `taskkill` cannot terminate `wsl.exe` relay processes — then confirms the worker's exit by identity, not PID liveness.
+
+## Trust, data, and cost boundaries
+
+- Delegated prompts and any repository context the provider CLI reads leave
+  Claude Code for OpenAI or Cursor under your existing local account and
+  provider configuration. Apply the same data-handling rules you use when
+  running those CLIs directly.
+- Delegation job records and private logs can contain prompts, results, source
+  excerpts, and local paths. They are retained under
+  `~/.claude/codex-companion` and `~/.claude/cursor-companion`; Goal's local
+  ledger lives under `~/.claude/goal-companion`. Treat all three as sensitive
+  artifacts.
+- Ambient delegation can start usage-billed work. It announces each handoff,
+  but does not ask for a second confirmation; tell Claude not to delegate when
+  you want the current session to stay within Claude. The opt-in review gate
+  can also loop and consume Claude and Codex usage until its stop condition
+  is satisfied.
+- Goal files are repository content. A command-kind acceptance criterion runs
+  through the shell with the same trust level as an npm script, so inspect
+  goals from an untrusted checkout before running `/goal:step` or `check`.
 
 ## Ambient delegation
 
 You don't have to type the commands yourself. Each plugin ships a delegation skill that triggers on task shape, so Claude can reach for Codex or Cursor on its own — a deep second opinion or security pass toward Codex, fast parallel implementation toward Cursor — announcing the handoff in one line, never silently. Jobs run in the background, and `status --wait` issued as a background task closes the loop: Claude picks up the result when the job finishes, without you polling.
+
+`task --background` uses a companion-owned detached worker and survives the
+Claude session that launched it. Reviews detach as Claude background tasks
+instead; they remain session-scoped and should be collected before ending the
+session.
 
 ```text
 You:    While you refactor the lock, get a second opinion on the cancel path.
@@ -307,7 +335,7 @@ wake reconciles that PR before starting another increment.
 
 Both delegation plugins share a hardened job chassis:
 
-- **Background jobs** — spawn, track, and detach; jobs survive the Claude session that started them.
+- **Detached task jobs** — `task --background` is tracked outside the Claude session that started it, remains visible to later sessions, and can still be cancelled by verified process ownership.
 - **Progress-aware status** — live phase, file-change/command/token telemetry, last-activity signals, and `likely dead` detection for stalled jobs.
 - **Stored results** — `result` renders the final output with files changed, reasoning summaries, the model that produced it, and a resume command (`codex resume <id>` / `cursor-agent --resume <id>`) to continue in the native tool.
 - **Race-safe state** — an exclusive lock plus a terminal-status merge guard make it impossible for a racing progress write to resurrect a cancelled job.
@@ -318,10 +346,10 @@ Both delegation plugins share a hardened job chassis:
 npm ci
 npm test          # node --test tests/*.test.mjs
 npm run build     # regenerates app-server types + tsc checkJs
-npm run verify    # local pre-merge gate: build + native suite + dockerized Linux suite
+npm run verify    # local gate: versions + build + native suite + dockerized Linux suite
 ```
 
-- **CI** runs the full suite on `ubuntu-latest` and `windows-latest` for every push and PR (~300 tests). Tests never require a real Codex/Cursor login — fake fixtures on `PATH` stand in for both CLIs.
+- **CI** runs the full suite on `ubuntu-latest` and `windows-latest`, plus a required Node 20 floor leg, for every push and PR. Tests never require a real Codex/Cursor login — fake fixtures on `PATH` stand in for both CLIs.
 - **Startup baseline gate** (opt-in, not part of `npm test`/`npm run verify` — see [ADR 0008](docs/adr/0008-startup-baseline-gate.md)):
   ```bash
   npm run startup:baseline   # pin docs/startup-baseline.json from this machine's accumulated startup metrics

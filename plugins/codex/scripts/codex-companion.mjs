@@ -41,6 +41,8 @@ import {
   matchesWindowsIdentity,
   probeWindowsProcessIdentity,
   isWindowsProcessIdentity,
+  pidFromWindowsProcessIdentity,
+  terminateProcessGroup,
   terminateProcessTree
 } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
@@ -48,11 +50,13 @@ import {
   consolidateLegacyState,
   generateJobId,
   getConfig,
+  isTerminalJobStatus,
   listJobs,
   readStartupMetrics,
   resolveStateDir,
   setConfig,
   summarizeLegacyStateShards,
+  updateState,
   upsertJob,
   writeCancelFlag,
   writeJobFile
@@ -152,7 +156,7 @@ function printUsage() {
       "",
       "Notes:",
       "  - task also accepts the prompt from piped stdin; --model spark maps to gpt-5.3-codex-spark.",
-      "  - task --profile deep uses gpt-5.6-sol at xhigh effort; --profile fast uses gpt-5.3-codex-spark. Explicit --model/--effort override the profile; review/adversarial-review reject --profile.",
+      "  - task --profile deep uses gpt-5.6-sol at xhigh effort; --profile fast uses gpt-5.3-codex-spark at medium effort. Explicit --model/--effort override the profile; review/adversarial-review reject --profile.",
       "  - every subcommand accepts --cwd <path> (alias -C)."
     ].join("\n")
   );
@@ -492,8 +496,21 @@ function renderStatusPayload(report, asJson) {
   return asJson ? report : renderStatusReport(report);
 }
 
-function isActiveJobStatus(status) {
-  return status === "queued" || status === "running";
+function isActiveJob(job) {
+  const hasAppServerOwnership =
+    Number.isFinite(job?.appServerPid) ||
+    Boolean(job?.appServerProcessIdentity) ||
+    Boolean(job?.appServerOwnershipSnapshot);
+  return (
+    job?.status === "queued" ||
+    job?.status === "running" ||
+    job?.phase === "cleanup-pending" ||
+    (typeof job?.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+    job?.cleanupOutcome?.verified === false ||
+    job?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && job?.appServerCleanupOutcome?.verified !== true) ||
+    (job?.status === "cancelled" && Number.isFinite(job?.wslAgentPid) && job?.wslReap?.reaped !== true)
+  );
 }
 
 function getCurrentClaudeSessionId() {
@@ -514,8 +531,7 @@ function findLatestResumableTaskJob(jobs) {
       (job) =>
         job.jobClass === "task" &&
         job.threadId &&
-        job.status !== "queued" &&
-        job.status !== "running"
+        !isActiveJob(job)
     ) ?? null
   );
 }
@@ -526,14 +542,14 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
-  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
+  while (isActiveJob(snapshot.job) && Date.now() < deadline) {
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
     snapshot = buildSingleJobSnapshot(cwd, reference);
   }
 
   return {
     ...snapshot,
-    waitTimedOut: isActiveJobStatus(snapshot.job.status),
+    waitTimedOut: isActiveJob(snapshot.job),
     timeoutMs
   };
 }
@@ -543,7 +559,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const sessionId = getCurrentClaudeSessionId();
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
-  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
+  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && isActiveJob(job));
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
   }
@@ -710,6 +726,10 @@ async function executeTaskRun(request) {
     effort: request.effort,
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
+    disableBroker: request.disableBroker === true,
+    gatedBrokerChild: request.gatedBrokerChild === true,
+    onAppServerOwnership: request.onAppServerOwnership,
+    onAppServerCleanupOutcome: request.onAppServerCleanupOutcome,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
@@ -755,6 +775,112 @@ async function executeTaskRun(request) {
     jobClass: "task",
     write: Boolean(request.write)
   };
+}
+
+export function persistTaskAppServerOwnership(workspaceRoot, jobId, ownership) {
+  if (!Number.isFinite(ownership?.pid) || typeof ownership?.processIdentity !== "string" || !ownership.processIdentity) {
+    throw new Error(`Unable to persist direct app-server ownership for ${jobId}: exact process identity is required.`);
+  }
+  const ownershipSnapshot = ownership.ownershipSnapshot ?? null;
+  if (
+    ownershipSnapshot &&
+    (ownershipSnapshot.rootPid !== ownership.pid || ownershipSnapshot.rootIdentity !== ownership.processIdentity)
+  ) {
+    throw new Error(`Unable to persist direct app-server ownership for ${jobId}: snapshot root does not match.`);
+  }
+
+  const patch = {
+    appServerPid: ownership.pid,
+    appServerProcessIdentity: ownership.processIdentity,
+    appServerOwnershipSnapshot: ownershipSnapshot
+  };
+  updateState(workspaceRoot, (state) => {
+    const index = state.jobs.findIndex((candidate) => candidate.id === jobId);
+    if (index === -1) {
+      throw new Error(`Unable to persist direct app-server ownership for missing job ${jobId}.`);
+    }
+    const storedJob = readStoredJob(workspaceRoot, jobId);
+    if (!storedJob) {
+      throw new Error(`Unable to persist direct app-server ownership for missing job file ${jobId}.`);
+    }
+    const current = { ...storedJob, ...state.jobs[index] };
+    const ownershipChanged = appServerOwnershipKey(current) !== appServerOwnershipKey(patch);
+    const cleanupPending =
+      ownershipChanged && current.status === "cancelled" && current.phase === "cancelled";
+    const next = {
+      ...current,
+      ...patch,
+      ...(ownershipChanged ? { appServerCleanupOutcome: null } : {}),
+      ...(cleanupPending
+        ? {
+            phase: "cleanup-pending",
+            cleanupFailure: "Direct app-server ownership appeared after cancellation; cleanup must be retried."
+          }
+        : {}),
+      updatedAt: nowIso()
+    };
+    state.jobs[index] = next;
+    writeJobFile(workspaceRoot, jobId, next);
+  });
+}
+
+function preferVerifiedCleanupOutcome(current, candidate) {
+  if (candidate?.verified === true) {
+    return candidate;
+  }
+  if (current?.verified === true) {
+    return current;
+  }
+  return candidate ?? current ?? null;
+}
+
+function cleanupOutcomeFromStores(stored, indexed, ownershipKeyFor, field) {
+  const indexedKey = ownershipKeyFor(indexed);
+  const storedKey = ownershipKeyFor(stored);
+  if (indexedKey && indexedKey !== storedKey) {
+    return indexed?.[field] ?? null;
+  }
+  return preferVerifiedCleanupOutcome(stored?.[field], indexed?.[field]);
+}
+
+export function persistTaskAppServerCleanupOutcome(workspaceRoot, jobId, outcome, options = {}) {
+  if (typeof outcome?.verified !== "boolean") {
+    throw new Error(`Unable to persist direct app-server cleanup for ${jobId}: a verified outcome is required.`);
+  }
+
+  const patch = { appServerCleanupOutcome: outcome };
+  updateState(workspaceRoot, (state) => {
+    const index = state.jobs.findIndex((candidate) => candidate.id === jobId);
+    if (index === -1) {
+      throw new Error(`Unable to persist direct app-server cleanup for missing job ${jobId}.`);
+    }
+    const storedJob = readStoredJob(workspaceRoot, jobId);
+    if (!storedJob) {
+      throw new Error(`Unable to persist direct app-server cleanup for missing job file ${jobId}.`);
+    }
+    const indexedJob = state.jobs[index];
+    if (
+      Object.hasOwn(options, "expectedAppServerOwnershipKey") &&
+      appServerOwnershipKey(indexedJob) !== options.expectedAppServerOwnershipKey
+    ) {
+      writeJobFile(workspaceRoot, jobId, { ...storedJob, ...indexedJob });
+      throw new Error(`Unable to persist direct app-server cleanup for ${jobId}: ownership changed during cleanup.`);
+    }
+    const appServerCleanupOutcome = preferVerifiedCleanupOutcome(
+      cleanupOutcomeFromStores(storedJob, indexedJob, appServerOwnershipKey, "appServerCleanupOutcome"),
+      patch.appServerCleanupOutcome
+    );
+    state.jobs[index] = {
+      ...indexedJob,
+      appServerCleanupOutcome,
+      updatedAt: nowIso()
+    };
+    writeJobFile(workspaceRoot, jobId, {
+      ...storedJob,
+      ...indexedJob,
+      appServerCleanupOutcome
+    });
+  });
 }
 
 function buildReviewJobMetadata(reviewName, target) {
@@ -943,6 +1069,7 @@ export function enqueueBackgroundTask(cwd, job, request, dependencies = {}) {
 
   const queuedRecord = {
     ...job,
+    sessionLifetime: "persistent",
     status: "queued",
     phase: "queued",
     pid: null,
@@ -1184,6 +1311,31 @@ export async function handleTaskWorker(argv, dependencies = {}) {
       logFile: storedJob.logFile ?? null
     }
   );
+  const persistent = storedJob.sessionLifetime === "persistent";
+  let lastAppServerOwnership = null;
+  let lastAppServerOwnershipKey = null;
+  const onAppServerOwnership = persistent
+    ? async (ownership) => {
+        const signature = JSON.stringify(ownership);
+        if (signature === lastAppServerOwnership) {
+          return;
+        }
+        persistTaskAppServerOwnership(workspaceRoot, storedJob.id, ownership);
+        lastAppServerOwnership = signature;
+        lastAppServerOwnershipKey = appServerOwnershipKey({
+          appServerPid: ownership.pid,
+          appServerProcessIdentity: ownership.processIdentity,
+          appServerOwnershipSnapshot: ownership.ownershipSnapshot
+        });
+      }
+    : undefined;
+  const onAppServerCleanupOutcome = persistent
+      ? async (outcome) => {
+        persistTaskAppServerCleanupOutcome(workspaceRoot, storedJob.id, outcome, {
+          expectedAppServerOwnershipKey: lastAppServerOwnershipKey
+        });
+      }
+    : undefined;
   await (dependencies.runTrackedJobImpl ?? runTrackedJob)(
     {
       ...storedTask,
@@ -1194,6 +1346,10 @@ export async function handleTaskWorker(argv, dependencies = {}) {
     () =>
       executeTaskRun({
         ...request,
+        disableBroker: persistent,
+        gatedBrokerChild: persistent,
+        onAppServerOwnership,
+        onAppServerCleanupOutcome,
         onProgress: progress
       }),
     { logFile }
@@ -1282,31 +1438,161 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
-function finishCancelledJob(workspaceRoot, record, interrupt, options) {
+function ownershipSnapshotKey(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return "";
+  }
+  const members = Array.isArray(snapshot.members)
+    ? snapshot.members
+        .map((member) => `${member?.pid ?? "?"}@${member?.identity ?? "?"}`)
+        .sort()
+        .join(",")
+    : "";
+  return [
+    snapshot.rootPid ?? "?",
+    snapshot.rootIdentity ?? "?",
+    snapshot.processGroupId ?? "?",
+    snapshot.sessionId ?? "?",
+    members
+  ].join("|");
+}
+
+function workerOwnershipKey(record) {
+  const identity = record?.processIdentity ?? record?.ownershipSnapshot?.rootIdentity ?? null;
+  const pid = Number.isFinite(record?.pid) ? record.pid : record?.ownershipSnapshot?.rootPid;
+  const root = identity ? `identity:${identity}` : Number.isFinite(pid) ? `pid:${pid}` : null;
+  return root ? `${root}|snapshot:${identity ? ownershipSnapshotKey(record?.ownershipSnapshot) : ""}` : null;
+}
+
+function appServerOwnershipKey(record) {
+  const identity = record?.appServerProcessIdentity ?? record?.appServerOwnershipSnapshot?.rootIdentity ?? null;
+  const pid = Number.isFinite(record?.appServerPid) ? record.appServerPid : record?.appServerOwnershipSnapshot?.rootPid;
+  const root = identity ? `identity:${identity}` : Number.isFinite(pid) ? `pid:${pid}` : null;
+  return root ? `${root}|snapshot:${ownershipSnapshotKey(record?.appServerOwnershipSnapshot)}` : null;
+}
+
+const CANCEL_OWNERSHIP_FIELDS = [
+  "pid",
+  "processIdentity",
+  "ownershipSnapshot",
+  "ownershipCaptureFailed",
+  "appServerPid",
+  "appServerProcessIdentity",
+  "appServerOwnershipSnapshot"
+];
+
+function persistCodexCancellationState(workspaceRoot, candidate, options = {}) {
+  let savedRecord = null;
+  let finalized = false;
+  let ownershipStable = false;
+  updateState(workspaceRoot, (state) => {
+    const index = state.jobs.findIndex((job) => job.id === candidate.id);
+    const indexed = index === -1 ? {} : state.jobs[index];
+    const stored = readStoredJob(workspaceRoot, candidate.id) ?? {};
+    const current = { ...stored, ...indexed };
+    const workerStable =
+      !Object.hasOwn(options, "expectedWorkerOwnershipKey") ||
+      workerOwnershipKey(current) === options.expectedWorkerOwnershipKey;
+    const appServerStable =
+      !Object.hasOwn(options, "expectedAppServerOwnershipKey") ||
+      appServerOwnershipKey(current) === options.expectedAppServerOwnershipKey;
+    const cleanupOutcome = workerStable ? preferVerifiedCleanupOutcome(
+      cleanupOutcomeFromStores(stored, indexed, workerOwnershipKey, "cleanupOutcome"),
+      candidate.cleanupOutcome
+    ) : current.cleanupOutcome ?? null;
+    const appServerCleanupOutcome = appServerStable ? preferVerifiedCleanupOutcome(
+      cleanupOutcomeFromStores(stored, indexed, appServerOwnershipKey, "appServerCleanupOutcome"),
+      candidate.appServerCleanupOutcome
+    ) : current.appServerCleanupOutcome ?? null;
+    const alreadyFinal = indexed.status === "cancelled" && indexed.phase === "cancelled";
+    ownershipStable = workerStable && appServerStable;
+    const final = ownershipStable && (options.final === true || alreadyFinal);
+    finalized = final;
+    const completedAt = final
+      ? candidate.completedAt ?? indexed.completedAt ?? stored.completedAt ?? nowIso()
+      : candidate.completedAt ?? indexed.completedAt ?? stored.completedAt ?? null;
+    savedRecord = {
+      ...stored,
+      ...indexed,
+      ...candidate,
+      status: final ? "cancelled" : candidate.status,
+      phase: final ? "cancelled" : "cleanup-pending",
+      pid: final ? null : candidate.pid,
+      cleanupOutcome,
+      appServerCleanupOutcome,
+      cleanupFailure:
+        final
+          ? null
+          : candidate.cleanupFailure ?? "Ownership changed while cancellation was verifying process cleanup.",
+      ...(completedAt ? { completedAt } : {})
+    };
+    for (const field of CANCEL_OWNERSHIP_FIELDS) {
+      if (Object.hasOwn(current, field)) {
+        savedRecord[field] = current[field];
+      }
+    }
+    savedRecord.pid = final
+      ? null
+      : ownershipStable
+        ? Number.isFinite(current.pid)
+          ? current.pid
+          : candidate.pid
+        : current.pid ?? null;
+    const indexedRecord = {
+      ...indexed,
+      id: candidate.id,
+      status: savedRecord.status,
+      phase: savedRecord.phase,
+      pid: savedRecord.pid,
+      cleanupOutcome,
+      appServerCleanupOutcome,
+      cleanupFailure: savedRecord.cleanupFailure,
+      ...(completedAt ? { completedAt } : {}),
+      ...(final ? { errorMessage: candidate.errorMessage ?? "Cancelled by user." } : {}),
+      updatedAt: nowIso()
+    };
+    for (const field of CANCEL_OWNERSHIP_FIELDS) {
+      if (Object.hasOwn(savedRecord, field)) {
+        indexedRecord[field] = savedRecord[field];
+      }
+    }
+    if (final) {
+      indexedRecord.pid = null;
+    } else {
+      indexedRecord.pid = savedRecord.pid;
+    }
+    if (index === -1) {
+      state.jobs.unshift(indexedRecord);
+    } else {
+      state.jobs[index] = indexedRecord;
+    }
+    writeJobFile(workspaceRoot, candidate.id, savedRecord);
+  });
+  return { record: savedRecord, finalized, ownershipStable };
+}
+
+function finishCancelledJob(workspaceRoot, record, interrupt, options, expectedOwnership = {}) {
   appendLogLine(record.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();
-  const nextJob = {
-    ...record,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt,
-    errorMessage: "Cancelled by user."
-  };
-
-  writeJobFile(workspaceRoot, record.id, {
-    ...nextJob,
-    cancelledAt: completedAt
-  });
-  upsertJob(workspaceRoot, {
-    id: record.id,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    errorMessage: "Cancelled by user.",
-    completedAt
-  });
+  const persisted = persistCodexCancellationState(
+    workspaceRoot,
+    {
+      ...record,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      completedAt,
+      cancelledAt: completedAt,
+      errorMessage: "Cancelled by user.",
+      cleanupFailure: null
+    },
+    { final: true, ...expectedOwnership }
+  );
+  if (!persisted.finalized) {
+    return persisted;
+  }
+  const nextJob = persisted.record;
 
   const payload = {
     jobId: record.id,
@@ -1317,6 +1603,135 @@ function finishCancelledJob(workspaceRoot, record, interrupt, options) {
   };
 
   outputCommandResult(payload, renderCancelReport(nextJob), options.json);
+  return persisted;
+}
+
+const CANONICAL_CANCEL_OWNERSHIP_FIELDS = [
+  "processIdentity",
+  "ownershipSnapshot",
+  "ownershipCaptureFailed",
+  "cleanupOutcome",
+  "appServerPid",
+  "appServerProcessIdentity",
+  "appServerOwnershipSnapshot",
+  "appServerCleanupOutcome",
+  "sessionLifetime"
+];
+
+function readCancelableRecord(workspaceRoot, fallbackJob) {
+  const indexedJob = listJobs(workspaceRoot).find((candidate) => candidate.id === fallbackJob.id) ?? fallbackJob;
+  const storedJob = readStoredJob(workspaceRoot, fallbackJob.id) ?? {};
+  const record = { ...indexedJob, ...storedJob };
+
+  // Job-file progress updates are unlocked read-modify-writes. The canonical
+  // state index is lock-serialized, so ownership proof must always win from
+  // there when both records carry it. A finite indexed worker PID wins too;
+  // a file-only PID still covers the brief file-before-index startup window.
+  for (const field of CANONICAL_CANCEL_OWNERSHIP_FIELDS) {
+    if (Object.hasOwn(indexedJob, field)) {
+      record[field] = indexedJob[field];
+    }
+  }
+  if (Number.isFinite(indexedJob.pid)) {
+    record.pid = indexedJob.pid;
+  }
+  record.cleanupOutcome = cleanupOutcomeFromStores(storedJob, indexedJob, workerOwnershipKey, "cleanupOutcome");
+  record.appServerCleanupOutcome = cleanupOutcomeFromStores(
+    storedJob,
+    indexedJob,
+    appServerOwnershipKey,
+    "appServerCleanupOutcome"
+  );
+  return record;
+}
+
+function verifiedNoopCleanup() {
+  return {
+    attempted: false,
+    delivered: false,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+}
+
+function enforceWindowsRecursiveCleanup(root, outcome, platform) {
+  if (!root.requireLiveWindowsRoot || platform !== "win32") {
+    return outcome;
+  }
+  if (
+    outcome?.verified === true &&
+    outcome.attempted === true &&
+    outcome.delivered === true &&
+    outcome.method === "taskkill"
+  ) {
+    return outcome;
+  }
+
+  return {
+    ...(outcome ?? {}),
+    attempted: outcome?.attempted === true,
+    delivered: outcome?.delivered === true,
+    verified: false,
+    degraded: true,
+    survivors: outcome?.survivors ?? [],
+    survivorIdentities:
+      Array.isArray(outcome?.survivorIdentities) && outcome.survivorIdentities.length > 0
+        ? outcome.survivorIdentities
+        : root.expectedRootIdentity
+          ? [root.expectedRootIdentity]
+          : [],
+    reason: outcome?.reason ?? "Windows app-server tree cleanup was not recursively delivered while its owned root was live."
+  };
+}
+
+async function cleanupOwnedRoot(record, root, dependencies) {
+  if (!root.required) {
+    return verifiedNoopCleanup();
+  }
+
+  if (root.requireLiveWindowsRoot && isWindowsProcessIdentity(root.expectedRootIdentity)) {
+    // Windows has exact root identity but no durable descendant snapshot.
+    // taskkill /T is sufficient only while that exact root still exists. If
+    // it vanished before cancellation, fail closed instead of claiming that
+    // potentially reparented helpers were verified absent.
+    const probe = (dependencies.probeWindowsProcessIdentityImpl ?? probeWindowsProcessIdentity)(root.pid);
+    if (
+      probe.status !== "ok" ||
+      !matchesWindowsIdentity(root.expectedRootIdentity, probe.identity)
+    ) {
+      return {
+        attempted: false,
+        delivered: false,
+        verified: false,
+        degraded: true,
+        method: "identity-check",
+        survivors: [],
+        survivorIdentities: [root.expectedRootIdentity]
+      };
+    }
+  }
+
+  try {
+    const platform = dependencies.platform ?? process.platform;
+    if (root.useProcessGroup && platform !== "win32") {
+      return await (dependencies.terminateProcessGroupImpl ?? terminateProcessGroup)(root.pid, {
+        ownershipSnapshot: root.ownershipSnapshot
+      });
+    }
+    const outcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(root.pid, {
+      platform,
+      expectedRootIdentity: root.expectedRootIdentity,
+      ownershipSnapshot: root.ownershipSnapshot,
+      requireVerifiedOwnership: root.ownershipCaptureFailed,
+      priorCleanupDegraded: root.priorCleanupDegraded
+    });
+    return enforceWindowsRecursiveCleanup(root, outcome, platform);
+  } catch (error) {
+    appendLogLine(record.logFile, `${root.label} termination for ${record.id} reported: ${error.message}`);
+    return null;
+  }
 }
 
 export async function handleCancel(argv, dependencies = {}) {
@@ -1329,28 +1744,55 @@ export async function handleCancel(argv, dependencies = {}) {
   consolidateLegacyState(cwd);
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
-  let existing = readStoredJob(workspaceRoot, job.id) ?? {};
-  let record = { ...job, ...existing };
-
-  if (!Number.isFinite(record.pid)) {
-    writeCancelFlag(workspaceRoot, job.id);
-    existing = readStoredJob(workspaceRoot, job.id) ?? existing;
-    record = { ...job, ...existing };
-    if (!Number.isFinite(record.pid)) {
-      finishCancelledJob(
-        workspaceRoot,
-        record,
-        { attempted: false, interrupted: false },
-        options
-      );
-      return;
+  writeCancelFlag(workspaceRoot, job.id);
+  const record = readCancelableRecord(workspaceRoot, job);
+  const expectedOwnership = {
+    expectedWorkerOwnershipKey: workerOwnershipKey(record),
+    expectedAppServerOwnershipKey: appServerOwnershipKey(record)
+  };
+  const retryAfterOwnershipChange = async () => {
+    const pass = dependencies.cancelOwnershipPass ?? 0;
+    if (pass >= 4) {
+      throw new Error(`Unable to cancel ${job.id}: process ownership did not stabilize.`);
     }
+    return handleCancel(argv, { ...dependencies, cancelOwnershipPass: pass + 1 });
+  };
+  const hasWorkerOwnership =
+    Number.isFinite(record.pid) ||
+    Boolean(record.processIdentity) ||
+    Boolean(record.ownershipSnapshot) ||
+    record.ownershipCaptureFailed === true;
+  const hasAppServerOwnership =
+    Number.isFinite(record.appServerPid) ||
+    Boolean(record.appServerProcessIdentity) ||
+    Boolean(record.appServerOwnershipSnapshot);
+  const appServerCleanupAlreadyVerified = record.appServerCleanupOutcome?.verified === true;
+  const workerCleanupAlreadyVerified = record.cleanupOutcome?.verified === true;
+
+  if (!hasWorkerOwnership && !hasAppServerOwnership) {
+    const finished = finishCancelledJob(
+      workspaceRoot,
+      record,
+      { attempted: false, interrupted: false },
+      options,
+      expectedOwnership
+    );
+    if (!finished.finalized) {
+      await retryAfterOwnershipChange();
+    }
+    return;
   }
 
   const threadId = record.threadId ?? null;
   const turnId = record.turnId ?? null;
 
-  const interrupt = await (dependencies.interruptAppServerTurnImpl ?? interruptAppServerTurn)(cwd, { threadId, turnId });
+  // Persistent background tasks own a direct app-server child inside their
+  // worker process. Connecting to the session broker cannot interrupt that
+  // turn, so cancellation goes straight to ownership-verified tree teardown.
+  const interrupt =
+    record.sessionLifetime === "persistent"
+      ? { attempted: false, interrupted: false }
+      : await (dependencies.interruptAppServerTurnImpl ?? interruptAppServerTurn)(cwd, { threadId, turnId });
   if (interrupt.attempted) {
     appendLogLine(
       record.logFile,
@@ -1360,28 +1802,39 @@ export async function handleCancel(argv, dependencies = {}) {
     );
   }
 
-  // Bind ownership proof from the merged record, not the job file alone:
-  // progress updates rewrite the file with unlocked read-modify-write, so a
-  // write that sampled the file before ownership landed can clobber those
-  // fields — while the lock-serialized state index still carries them.
   const expectedRootIdentity = record.processIdentity ?? null;
+  const workerPid = Number.isFinite(record.pid)
+    ? record.pid
+    : pidFromWindowsProcessIdentity(expectedRootIdentity);
   const ownershipCaptureFailed = record.ownershipCaptureFailed === true;
-  writeCancelFlag(workspaceRoot, job.id);
-  let cleanupOutcome = null;
-  try {
-    cleanupOutcome = await (dependencies.terminateProcessTreeImpl ?? terminateProcessTree)(record.pid, {
-      expectedRootIdentity,
-      ownershipSnapshot: record.ownershipSnapshot ?? null,
-      requireVerifiedOwnership: ownershipCaptureFailed,
-      priorCleanupDegraded: record.cleanupOutcome?.degraded === true
-    });
-  } catch (error) {
-    // A partially resistant tree is not fatal: sandboxed codex.exe children
-    // can reject taskkill ("operation is not supported") yet still exit on
-    // their own once the worker's pipes close. The identity poll below
-    // decides whether the worker actually died.
-    appendLogLine(record.logFile, `Process tree termination for ${job.id} reported: ${error.message}`);
-  }
+  const appServerExpectedRootIdentity = record.appServerProcessIdentity ?? null;
+  const appServerOwnershipCaptureFailed = hasAppServerOwnership && !appServerExpectedRootIdentity;
+
+  // The direct app-server is detached from its worker on Unix. Reclaim it
+  // first from its independently durable snapshot, then clean the worker;
+  // cancellation is terminal only after both required roots verify absent.
+  const appServerCleanupOutcome = await cleanupOwnedRoot(record, {
+    label: "Direct app-server tree",
+    required: hasAppServerOwnership && !appServerCleanupAlreadyVerified,
+    pid: record.appServerPid,
+    expectedRootIdentity: appServerExpectedRootIdentity,
+    ownershipSnapshot: record.appServerOwnershipSnapshot ?? null,
+    ownershipCaptureFailed: appServerOwnershipCaptureFailed,
+    priorCleanupDegraded: record.appServerCleanupOutcome?.degraded === true,
+    requireLiveWindowsRoot: true,
+    useProcessGroup: true
+  }, dependencies);
+  let cleanupOutcome = await cleanupOwnedRoot(record, {
+    label: "Worker process tree",
+    required: hasWorkerOwnership && !workerCleanupAlreadyVerified,
+    pid: workerPid,
+    expectedRootIdentity,
+    ownershipSnapshot: record.ownershipSnapshot ?? null,
+    ownershipCaptureFailed,
+    priorCleanupDegraded: record.cleanupOutcome?.degraded === true,
+    requireLiveWindowsRoot: false,
+    useProcessGroup: false
+  }, dependencies);
 
   if (cleanupOutcome?.verified !== true && isWindowsProcessIdentity(expectedRootIdentity)) {
     // The worker exits by itself once the cancel flag is set and its
@@ -1391,7 +1844,7 @@ export async function handleCancel(argv, dependencies = {}) {
     const probeImpl = dependencies.probeWindowsProcessIdentityImpl ?? probeWindowsProcessIdentity;
     const deadline = Date.now() + (dependencies.workerExitWaitMs ?? 5000);
     for (;;) {
-      const probe = probeImpl(record.pid);
+      const probe = probeImpl(workerPid);
       if (probe.status === "absent" || (probe.status === "ok" && !matchesWindowsIdentity(expectedRootIdentity, probe.identity))) {
         cleanupOutcome = { ...(cleanupOutcome ?? {}), attempted: true, delivered: true, verified: true, method: "identity-poll" };
         break;
@@ -1403,33 +1856,79 @@ export async function handleCancel(argv, dependencies = {}) {
     }
   }
 
-  if (cleanupOutcome?.verified !== true) {
+  // Another cancellation or the worker's close callback may have completed a
+  // root while this invocation was awaiting teardown. Verified cleanup is a
+  // durable fact and must win over this invocation's stale failure result.
+  const postCleanupRecord = readCancelableRecord(workspaceRoot, record);
+  if (
+    workerOwnershipKey(postCleanupRecord) !== expectedOwnership.expectedWorkerOwnershipKey ||
+    appServerOwnershipKey(postCleanupRecord) !== expectedOwnership.expectedAppServerOwnershipKey
+  ) {
+    await retryAfterOwnershipChange();
+    return;
+  }
+  cleanupOutcome = preferVerifiedCleanupOutcome(cleanupOutcome, postCleanupRecord.cleanupOutcome);
+  const mergedAppServerCleanupOutcome = preferVerifiedCleanupOutcome(
+    appServerCleanupOutcome,
+    postCleanupRecord.appServerCleanupOutcome
+  );
+
+  if (cleanupOutcome?.verified !== true || mergedAppServerCleanupOutcome?.verified !== true) {
     const failureMessage =
-      ownershipCaptureFailed && !expectedRootIdentity
+      (ownershipCaptureFailed && !expectedRootIdentity) ||
+      (appServerOwnershipCaptureFailed && !appServerExpectedRootIdentity)
         ? `Job ${job.id} could not be verified as owned and was left alone.`
         : `Unable to verify cleanup for ${job.id}; ownership records were preserved for retry.`;
     appendLogLine(record.logFile, failureMessage);
+    const latestIndexedRecord = listJobs(workspaceRoot).find((candidate) => candidate.id === job.id) ?? record;
+    const latestRecord = readCancelableRecord(workspaceRoot, record);
+    const recoveryStatus = isTerminalJobStatus(latestIndexedRecord.status)
+      ? latestIndexedRecord.status
+      : record.status;
     const recoveryRecord = {
-      ...record,
-      status: record.status,
+      ...latestRecord,
+      status: recoveryStatus,
       phase: "cleanup-pending",
-      pid: record.pid,
+      pid: workerPid,
       cleanupOutcome,
+      appServerCleanupOutcome: mergedAppServerCleanupOutcome,
       cleanupFailure: failureMessage
     };
-    writeJobFile(workspaceRoot, job.id, recoveryRecord);
-    upsertJob(workspaceRoot, {
-      id: job.id,
-      status: record.status,
-      phase: "cleanup-pending",
-      pid: record.pid,
-      cleanupOutcome,
-      cleanupFailure: failureMessage
-    });
+    const persisted = persistCodexCancellationState(workspaceRoot, recoveryRecord, expectedOwnership);
+    if (!persisted.ownershipStable) {
+      await retryAfterOwnershipChange();
+      return;
+    }
+    const authoritative = persisted.record;
+    if (
+      authoritative.status === "cancelled" &&
+      authoritative.phase === "cancelled" &&
+      authoritative.cleanupOutcome?.verified === true &&
+      authoritative.appServerCleanupOutcome?.verified === true
+    ) {
+      const finished = finishCancelledJob(workspaceRoot, authoritative, interrupt, options, expectedOwnership);
+      if (!finished.finalized) {
+        await retryAfterOwnershipChange();
+      }
+      return;
+    }
     throw new Error(failureMessage);
   }
 
-  finishCancelledJob(workspaceRoot, record, interrupt, options);
+  const finished = finishCancelledJob(
+    workspaceRoot,
+    {
+      ...record,
+      cleanupOutcome,
+      appServerCleanupOutcome: mergedAppServerCleanupOutcome
+    },
+    interrupt,
+    options,
+    expectedOwnership
+  );
+  if (!finished.finalized) {
+    await retryAfterOwnershipChange();
+  }
 }
 
 async function main() {

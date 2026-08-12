@@ -359,7 +359,7 @@ function runPlanSync(plan, args, options = {}) {
   });
 
   return {
-    status: result.status ?? 0,
+    status: result.status,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",

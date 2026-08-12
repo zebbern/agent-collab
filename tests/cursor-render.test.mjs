@@ -146,6 +146,21 @@ test("renderJobStatusReport shows the transport label, model, and resume handoff
   assert.match(output, /Result: \/cursor:result task-7/);
 });
 
+test("renderJobStatusReport directs cleanup-pending jobs to cancel, not result", () => {
+  const output = renderJobStatusReport({
+    id: "task-cleanup-retry",
+    status: "failed",
+    phase: "failed",
+    cleanupOutcome: { verified: false },
+    kindLabel: "task",
+    title: "Cursor Task",
+    jobClass: "task"
+  });
+
+  assert.match(output, /Cancel: \/cursor:cancel task-cleanup-retry/);
+  assert.doesNotMatch(output, /Result: \/cursor:result task-cleanup-retry/);
+});
+
 test("renderStoredJobResult shows the model line only when the stored result carries it", () => {
   const explicit = renderStoredJobResult(
     { id: "task-90", status: "completed", title: "Cursor Task", jobClass: "task", threadId: "sess-m1" },

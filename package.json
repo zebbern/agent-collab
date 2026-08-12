@@ -18,9 +18,11 @@
     "startup:baseline": "node scripts/startup-baseline.mjs --save-baseline",
     "startup:compare": "node scripts/startup-baseline.mjs --compare",
     "test": "node scripts/run-tests.mjs",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "verify:no-linux": "node scripts/verify.mjs --no-linux"
   },
   "devDependencies": {
+    "@openai/codex": "0.147.0",
     "@types/node": "^25.5.0",
     "typescript": "^6.0.2"
   }

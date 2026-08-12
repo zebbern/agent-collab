@@ -15,7 +15,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadReusableBrokerSession } from "./broker-lifecycle.mjs";
-import { captureProcessOwnership, normalizeProcessCleanupOutcome, terminateProcessGroup, terminateProcessTree } from "./process.mjs";
+import { captureProcessOwnership, getWindowsProcessIdentity, normalizeProcessCleanupOutcome, terminateProcessGroup, terminateProcessTree } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -77,6 +77,8 @@ class AppServerClientBase {
     this.transportFallback = null;
     /** @type {Partial<ReturnType<typeof normalizeProcessCleanupOutcome>> | null} */
     this.cleanupOutcome = null;
+    this.ownershipPublished = false;
+    this.cleanupOutcomePublished = false;
 
     this.exitPromise = new Promise((resolve) => {
       this.resolveExit = resolve;
@@ -207,13 +209,19 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    const gated = this.options.gatedBrokerChild === true && process.platform !== "win32";
+    // The Node activation wrapper and its extra control pipe work on every
+    // supported platform. Persistent direct workers require it on Windows
+    // too: the real app-server must not start before its exact identity is
+    // durably published to the job record.
+    const gated = this.options.gatedBrokerChild === true;
     this.proc = spawn(gated ? process.execPath : "codex", gated ? [GATED_APP_SERVER_CHILD] : ["app-server"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       detached: process.platform !== "win32",
       stdio: gated ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+      // The wrapper is launched by absolute Node executable and must remain
+      // the identity-bearing root. Only direct `codex` needs cmd resolution.
+      shell: process.platform === "win32" && !gated ? (process.env.SHELL || true) : false,
       windowsHide: true
     });
     this.proc.stdout.setEncoding("utf8");
@@ -248,29 +256,48 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
 
     try {
       const captureOwnership = this.options.captureProcessOwnershipImpl ?? captureProcessOwnership;
-      this.ownershipSnapshot =
-        process.platform === "win32"
-          ? null
-          : captureOwnership(this.proc.pid, {
+      if (process.platform === "win32") {
+        this.ownershipSnapshot = null;
+        if (this.options.onAppServerOwnership) {
+          const getWindowsIdentity = this.options.getWindowsProcessIdentityImpl ?? getWindowsProcessIdentity;
+          const attempts = this.options.windowsIdentityProbeAttempts ?? 3;
+          for (let attempt = 0; attempt < attempts && !this.procIdentity; attempt += 1) {
+            this.procIdentity = getWindowsIdentity(this.proc.pid, {
               cwd: this.cwd,
               env: this.options.env ?? process.env
             });
-      this.procIdentity = this.ownershipSnapshot?.rootIdentity ?? null;
+            if (!this.procIdentity && attempt + 1 < attempts) {
+              await new Promise((resolve) => setTimeout(resolve, this.options.windowsIdentityProbeRetryMs ?? 100));
+            }
+          }
+        } else {
+          this.procIdentity = null;
+        }
+      } else {
+        this.ownershipSnapshot = captureOwnership(this.proc.pid, {
+          cwd: this.cwd,
+          env: this.options.env ?? process.env
+        });
+        this.procIdentity = this.ownershipSnapshot?.rootIdentity ?? null;
+      }
     } catch (error) {
       this.identityCaptureFailed = true;
       throw error;
     }
-    if (process.platform !== "win32" && !this.procIdentity) {
+    if (!this.procIdentity && (process.platform !== "win32" || this.options.onAppServerOwnership)) {
       this.identityCaptureFailed = true;
       throw new Error("Unable to capture codex app-server process identity.");
     }
     if (gated) {
+      await this.publishOwnership();
       await this.options.beforeAppServerActivation?.(this.ownershipSnapshot);
       const activationControl = this.proc.stdio?.[3];
       if (!activationControl) {
         throw new Error("Codex app-server activation control is unavailable.");
       }
       /** @type {import("node:stream").Writable} */ (activationControl).end("activate\n");
+    } else {
+      await this.publishOwnership();
     }
     await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
@@ -300,8 +327,24 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
     return this.ownershipSnapshot;
   }
 
+  async publishOwnership() {
+    if (!this.options.onAppServerOwnership) {
+      return;
+    }
+    if (!Number.isFinite(this.proc?.pid) || !this.procIdentity) {
+      throw new Error("Unable to publish codex app-server ownership without an exact process identity.");
+    }
+    await this.options.onAppServerOwnership({
+      pid: this.proc.pid,
+      processIdentity: this.procIdentity,
+      ownershipSnapshot: this.ownershipSnapshot ?? null
+    });
+    this.ownershipPublished = true;
+  }
+
   async refreshOwnership() {
     if (process.platform === "win32" || !this.procIdentity || !this.proc?.pid) {
+      await this.publishOwnership();
       return this.ownershipSnapshot ?? null;
     }
     const captureOwnership = this.options.captureProcessOwnershipImpl ?? captureProcessOwnership;
@@ -311,6 +354,7 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
     });
     const ownershipSnapshot = this.mergeOwnershipSnapshot(observation);
     await this.options.afterAppServerOwnershipRefresh?.(ownershipSnapshot);
+    await this.publishOwnership();
     return ownershipSnapshot;
   }
 
@@ -357,8 +401,27 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
 
   startUnexpectedExitCleanup(pid) {
     if (
+      (this.options.platform ?? process.platform) === "win32" &&
+      this.ownershipPublished === true &&
+      !this.cleanupOutcome
+    ) {
+      // A vanished Windows root is not proof that its detached descendants
+      // died. Windows has no durable member snapshot here, so retain the job
+      // as cleanup-pending rather than claiming terminal success.
+      this.cleanupOutcome = normalizeProcessCleanupOutcome({
+        attempted: false,
+        delivered: false,
+        verified: false,
+        degraded: true,
+        method: "identity-check",
+        survivors: [],
+        survivorIdentities: this.procIdentity ? [this.procIdentity] : []
+      });
+      return null;
+    }
+    if (
       this.unexpectedExitCleanupPromise ||
-      process.platform === "win32" ||
+      (this.options.platform ?? process.platform) === "win32" ||
       !Number.isFinite(pid) ||
       !this.ownershipSnapshot?.rootIdentity
     ) {
@@ -403,9 +466,76 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
     return this.unexpectedExitCleanupPromise ?? null;
   }
 
+  normalizeCleanupOutcome(outcome) {
+    const normalized = normalizeProcessCleanupOutcome(outcome);
+    const platform = this.options.platform ?? process.platform;
+    if (
+      platform !== "win32" ||
+      this.ownershipPublished !== true ||
+      normalized.verified !== true ||
+      (normalized.attempted === true && normalized.delivered === true && normalized.method === "taskkill")
+    ) {
+      return normalized;
+    }
+
+    // For a durably published Windows app-server root, an absent/mismatched
+    // identity check or root-only `kill` is not proof that taskkill /T reached
+    // descendants. Only a delivered and verified recursive taskkill can make
+    // the app-server ownership record terminal.
+    return normalizeProcessCleanupOutcome({
+      ...normalized,
+      verified: false,
+      degraded: true,
+      survivorIdentities:
+        normalized.survivorIdentities.length > 0
+          ? normalized.survivorIdentities
+          : this.procIdentity
+            ? [this.procIdentity]
+            : [],
+      reason: normalized.reason ?? "Windows app-server tree cleanup was not recursively delivered while its owned root was live."
+    });
+  }
+
+  async publishCleanupOutcome() {
+    if (
+      this.ownershipPublished !== true ||
+      this.cleanupOutcomePublished ||
+      !this.cleanupOutcome ||
+      !this.options.onAppServerCleanupOutcome
+    ) {
+      return;
+    }
+
+    try {
+      await this.options.onAppServerCleanupOutcome(
+        /** @type {import("./app-server-protocol").AppServerCleanupOutcome} */ (this.cleanupOutcome)
+      );
+      this.cleanupOutcomePublished = true;
+    } catch (error) {
+      // Verified cleanup that could not be made durable is not durable proof.
+      // Fail closed so runTrackedJob preserves the ownership record for retry.
+      this.cleanupOutcome = normalizeProcessCleanupOutcome({
+        ...this.cleanupOutcome,
+        verified: false,
+        degraded: true,
+        reason: `Unable to persist direct app-server cleanup outcome: ${error instanceof Error ? error.message : String(error)}`
+      });
+      throw error;
+    }
+  }
+
   async close() {
     if (this.closed) {
-      await this.waitForExit();
+      const exited = await this.waitForExit();
+      if (!exited) {
+        this.cleanupOutcome = normalizeProcessCleanupOutcome({
+          ...(this.cleanupOutcome ?? {}),
+          attempted: true,
+          verified: false,
+          degraded: true
+        });
+      }
+      await this.publishCleanupOutcome();
       return;
     }
 
@@ -427,6 +557,17 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
       const terminate = this.options.terminateProcessTreeImpl ?? terminateProcessTree;
       const platform = this.options.platform ?? process.platform;
       if (platform === "win32") {
+        if (this.ownershipPublished === true && this.proc.exitCode !== null && !this.cleanupOutcome) {
+          this.cleanupOutcome = normalizeProcessCleanupOutcome({
+            attempted: false,
+            delivered: false,
+            verified: false,
+            degraded: true,
+            method: "identity-check",
+            survivors: [],
+            survivorIdentities: this.procIdentity ? [this.procIdentity] : []
+          });
+        }
         // Terminate synchronously during close. An unref'd timer never fires
         // when the companion exits immediately, orphaning the app-server
         // child; taskkill runs synchronously so there is no reason to defer.
@@ -441,15 +582,24 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
               runCommandImpl: this.options.runCommandImpl,
               warnImpl: () => {}
             });
-            this.cleanupOutcome = normalizeProcessCleanupOutcome(outcome);
-            if (!outcome.verified) {
+            this.cleanupOutcome = this.normalizeCleanupOutcome(outcome);
+            if (!this.cleanupOutcome.verified) {
               process.stderr.write(
-                `Warning: unable to verify codex app-server cleanup; surviving PIDs: ${outcome.survivors?.join(", ") || "none known"}.\n`
+                `Warning: unable to verify codex app-server cleanup; surviving PIDs: ${this.cleanupOutcome.survivors?.join(", ") || "none known"}.\n`
               );
             }
           } catch {
-            // Best-effort cleanup during shutdown — swallow errors to avoid
-            // crashing the host process.
+            // Cleanup errors must not make published ownership appear gone.
+            // The caller persists this fail-closed outcome for cancel retry.
+            this.cleanupOutcome = normalizeProcessCleanupOutcome({
+              attempted: true,
+              delivered: false,
+              verified: false,
+              degraded: true,
+              method: "taskkill",
+              survivors: [this.proc.pid],
+              survivorIdentities: this.procIdentity ? [this.procIdentity] : []
+            });
           }
         }
       } else {
@@ -458,14 +608,20 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
         if (this.unexpectedExitCleanupPromise) {
           await this.unexpectedExitCleanupPromise;
         } else {
-          const outcome = await terminate(this.proc.pid, {
-            expectedRootIdentity: this.procIdentity,
-            ownershipSnapshot: this.ownershipSnapshot,
-            requireVerifiedOwnership: this.identityCaptureFailed,
-            ownerHoldsLiveHandle: true,
-            directKillImpl: (signal) => this.proc.kill(signal),
-            warnImpl: () => {}
-          });
+          const outcome = this.ownershipSnapshot?.rootIdentity
+            ? await (this.options.terminateProcessGroupImpl ?? terminateProcessGroup)(this.proc.pid, {
+                ownershipSnapshot: this.ownershipSnapshot,
+                killImpl: this.options.killImpl,
+                warnImpl: () => {}
+              })
+            : await terminate(this.proc.pid, {
+                expectedRootIdentity: this.procIdentity,
+                ownershipSnapshot: this.ownershipSnapshot,
+                requireVerifiedOwnership: this.identityCaptureFailed,
+                ownerHoldsLiveHandle: true,
+                directKillImpl: (signal) => this.proc.kill(signal),
+                warnImpl: () => {}
+              });
           this.cleanupOutcome = normalizeProcessCleanupOutcome(outcome);
           if (!outcome.verified) {
             process.stderr.write(
@@ -485,6 +641,7 @@ export class SpawnedCodexAppServerClient extends AppServerClientBase {
         degraded: true
       });
     }
+    await this.publishCleanupOutcome();
   }
 
   async waitForExit() {
@@ -605,7 +762,15 @@ export class CodexAppServerClient {
         };
       }
       if (client.cleanupOutcome?.verified === false) {
-        error.cleanupOutcome = client.cleanupOutcome;
+        const cleanupError = /** @type {Error & {
+         *   cleanupOutcome?: unknown,
+         *   appServerCleanupOutcome?: unknown
+         * }} */ (error instanceof Error ? error : new Error(String(error)));
+        cleanupError.cleanupOutcome = client.cleanupOutcome;
+        if (client.transport === "direct" && client.ownershipPublished === true) {
+          cleanupError.appServerCleanupOutcome = client.cleanupOutcome;
+        }
+        throw cleanupError;
       }
       throw error;
     }

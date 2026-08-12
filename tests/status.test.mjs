@@ -11,9 +11,10 @@ import {
   buildStatusSnapshot,
   enrichJob,
   resolveCancelableJob,
+  resolveResultJob,
   STALE_QUEUED_JOB_THRESHOLD_MS
 } from "../plugins/codex/scripts/lib/job-control.mjs";
-import { listJobs, resolveStateDir, saveState, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveStateDir, saveState, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 
 // Keep every state write inside a temp canonical root — never the real
 // per-user ~/.claude/codex-companion. Single-file runs bypass the runner's
@@ -54,6 +55,90 @@ test("a job miss stays terse when no legacy residue exists", () => {
     assert.doesNotMatch(error.message, /older plugin version/);
     return true;
   });
+});
+
+test("no-id job operations expose persistent jobs across sessions without exposing old foreground jobs", () => {
+  const workspace = makeTempDir();
+  const persistentActive = {
+    id: "task-persistent-active",
+    kind: "task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    sessionId: "sess-previous",
+    status: "running",
+    pid: null,
+    createdAt: "2026-07-28T09:00:00.000Z",
+    updatedAt: "2026-07-28T09:04:00.000Z"
+  };
+  const persistentFinished = {
+    id: "task-persistent-finished",
+    kind: "task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    sessionId: "sess-previous",
+    status: "completed",
+    pid: null,
+    createdAt: "2026-07-28T08:00:00.000Z",
+    updatedAt: "2026-07-28T08:04:00.000Z"
+  };
+  const oldForegroundActive = {
+    id: "review-old-active",
+    kind: "review",
+    jobClass: "review",
+    sessionId: "sess-previous",
+    status: "running",
+    pid: null,
+    createdAt: "2026-07-28T10:00:00.000Z",
+    updatedAt: "2026-07-28T10:04:00.000Z"
+  };
+  const oldForegroundFinished = {
+    id: "review-old-finished",
+    kind: "review",
+    jobClass: "review",
+    sessionId: "sess-previous",
+    status: "completed",
+    pid: null,
+    createdAt: "2026-07-28T11:00:00.000Z",
+    updatedAt: "2026-07-28T11:04:00.000Z"
+  };
+
+  saveState(workspace, {
+    version: 1,
+    config: { stopReviewGate: false },
+    jobs: [oldForegroundFinished, oldForegroundActive, persistentActive, persistentFinished]
+  });
+  writeJobFile(workspace, persistentFinished.id, {
+    ...persistentFinished,
+    result: { rawOutput: "Persistent result" }
+  });
+  writeJobFile(workspace, oldForegroundFinished.id, {
+    ...oldForegroundFinished,
+    result: { rawOutput: "Old foreground result" }
+  });
+
+  const previousSessionId = process.env.CODEX_COMPANION_SESSION_ID;
+  process.env.CODEX_COMPANION_SESSION_ID = "sess-current";
+  try {
+    const report = buildStatusSnapshot(workspace, {
+      env: { CODEX_COMPANION_SESSION_ID: "sess-current" },
+      getLiveProcessPidsImpl: () => []
+    });
+    assert.deepEqual(report.running.map((job) => job.id), [persistentActive.id]);
+    assert.equal(report.latestFinished?.id, persistentFinished.id);
+    assert.equal(resolveResultJob(workspace, "").job.id, persistentFinished.id);
+    assert.equal(
+      resolveCancelableJob(workspace, "", {
+        env: { CODEX_COMPANION_SESSION_ID: "sess-current" }
+      }).job.id,
+      persistentActive.id
+    );
+  } finally {
+    if (previousSessionId === undefined) {
+      delete process.env.CODEX_COMPANION_SESSION_ID;
+    } else {
+      process.env.CODEX_COMPANION_SESSION_ID = previousSessionId;
+    }
+  }
 });
 
 test("boundTelemetryItems keeps short lists untouched", () => {

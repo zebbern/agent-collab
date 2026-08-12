@@ -5,6 +5,19 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## Unreleased
+
+- Companion-enqueued `task --background` jobs now survive the Claude session
+  that launched them. Persistent workers use a private app-server so
+  SessionEnd can tear down its shared broker without killing the task; later
+  sessions can discover, read, or cancel the job, while foreground reviews
+  remain session-scoped. Session cleanup merges against fresh locked state
+  after process teardown, so it cannot overwrite a worker's concurrent PID or
+  remove a newly enqueued job.
+- Signal-terminated subprocess probes retain their null exit status and fail
+  closed instead of being reported as exit 0, preserving process-enumeration
+  and ownership-verification guarantees.
+
 ## 1.0.6+fork.7
 
 - The `fast` task profile now pins `--effort medium` instead of inheriting the user's `~/.codex` default. With `model_reasoning_effort = "ultra"` (or `max`) in the user config, every `--profile fast` task failed with an API 400 — the spark model supports only low/medium/high/xhigh (observed live 2026-08-08, first real `--profile fast` run on a configured machine). Profiles are now fully specified (model + effort) so user config can never produce an unsupported combination; an explicit `--effort` still overrides the profile default.

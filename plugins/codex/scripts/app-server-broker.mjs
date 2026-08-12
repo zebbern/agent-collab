@@ -26,6 +26,9 @@ const BROKER_NOT_ACTIVATED_RPC_CODE = -32004;
 const BROKER_ACTIVATION_ACK = "activated";
 const CHILD_OBSERVATION_RETRY_DELAYS_MS = [10, 25, 50, 100];
 
+/** @typedef {Error & { rpcCode?: number, requiresChildTeardown?: boolean }} BrokerRequestError */
+/** @typedef {import("./lib/app-server.mjs").SpawnedCodexAppServerClient} SpawnedCodexAppServerClient */
+
 export function isBrokerRequestAllowedDuringShutdown(shuttingDown, message) {
   return !shuttingDown || message?.method === "broker/shutdown";
 }
@@ -273,6 +276,7 @@ async function main() {
     if (!blockedCleanup) {
       return error;
     }
+    /** @type {BrokerRequestError} */
     const cleanupError = new Error("Shared Codex app-server cleanup is unverified after ownership publication failed.");
     cleanupError.rpcCode = BROKER_CLEANUP_UNVERIFIED_RPC_CODE;
     return cleanupError;
@@ -332,12 +336,14 @@ async function main() {
           identities: blockedCleanup.survivorIdentities
         });
         if (liveSurvivors.length > 0) {
+          /** @type {BrokerRequestError} */
           const error = new Error(`Shared Codex broker cleanup is unverified; surviving PIDs: ${liveSurvivors.join(", ")}.`);
           error.rpcCode = BROKER_CLEANUP_UNVERIFIED_RPC_CODE;
           throw error;
         }
         blockedCleanup = null;
       } else if (blockedCleanup.degraded) {
+        /** @type {BrokerRequestError} */
         const error = new Error("Shared Codex broker cleanup is unverified; refusing to spawn a replacement child.");
         error.rpcCode = BROKER_CLEANUP_UNVERIFIED_RPC_CODE;
         throw error;
@@ -349,6 +355,7 @@ async function main() {
 
   async function getAppClient() {
     if (shuttingDown) {
+      /** @type {BrokerRequestError} */
       const error = new Error("Shared Codex broker is shutting down.");
       error.rpcCode = BROKER_SHUTDOWN_RPC_CODE;
       throw error;
@@ -361,6 +368,7 @@ async function main() {
     if (appClientClosePromise) {
       await appClientClosePromise;
       if (shuttingDown) {
+        /** @type {BrokerRequestError} */
         const error = new Error("Shared Codex broker is shutting down.");
         error.rpcCode = BROKER_SHUTDOWN_RPC_CODE;
         throw error;
@@ -376,12 +384,14 @@ async function main() {
         async beforeAppServerActivation(ownershipSnapshot) {
           registration = getBrokerRegistration();
           if (registration?.registered !== true) {
+            /** @type {BrokerRequestError} */
             const error = new Error("Shared Codex broker ownership registration is unavailable.");
             error.rpcCode = BROKER_OWNERSHIP_RPC_CODE;
             throw error;
           }
           childRegistration = publishBrokerChild(registration, { ownershipSnapshot });
           if (childRegistration.registered !== true) {
+            /** @type {BrokerRequestError} */
             const error = new Error(`Unable to register shared Codex app-server ownership (${childRegistration.reason ?? "unknown"}).`);
             error.rpcCode = BROKER_OWNERSHIP_RPC_CODE;
             throw error;
@@ -389,6 +399,7 @@ async function main() {
         },
         async afterAppServerOwnershipRefresh(ownershipSnapshot) {
           if (registration?.registered !== true || childRegistration?.registered !== true) {
+            /** @type {BrokerRequestError} */
             const error = new Error("Shared Codex app-server ownership registration was lost before helper observation.");
             error.rpcCode = BROKER_OWNERSHIP_RPC_CODE;
             throw error;
@@ -398,6 +409,7 @@ async function main() {
             ownershipSnapshot
           });
           if (observation.observed !== true) {
+            /** @type {BrokerRequestError} */
             const error = new Error(`Unable to publish shared Codex app-server helper ownership (${observation.reason ?? "unknown"}).`);
             error.rpcCode = BROKER_OWNERSHIP_RPC_CODE;
             error.requiresChildTeardown = true;
@@ -412,6 +424,7 @@ async function main() {
         .then(async (client) => {
           if (registration?.registered !== true || childRegistration?.registered !== true) {
             await client.close().catch(() => {});
+            /** @type {BrokerRequestError} */
             const error = new Error("Shared Codex app-server activation lost its durable ownership registration.");
             error.rpcCode = BROKER_OWNERSHIP_RPC_CODE;
             throw error;
@@ -421,7 +434,7 @@ async function main() {
           registryChild = childRegistration.child;
           appClientRegistryChild = registryChild;
           client.setNotificationHandler(routeNotification);
-          const childPid = client.proc?.pid ?? null;
+          const childPid = /** @type {SpawnedCodexAppServerClient} */ (client).proc?.pid ?? null;
           client.setExitHandler(() => {
             clearStreamState();
             if (appClient === client) {
@@ -433,7 +446,7 @@ async function main() {
               // exit its surviving helpers reparent away from the broker, so
               // wait for the client's shared direct/broker crash cleanup before
               // allowing a replacement to spawn.
-              appClientClosePromise = client
+              appClientClosePromise = /** @type {SpawnedCodexAppServerClient} */ (client)
                 .waitForUnexpectedExitCleanup()
                 ?.then(() => {
                   recordUnverifiedCleanup(client);

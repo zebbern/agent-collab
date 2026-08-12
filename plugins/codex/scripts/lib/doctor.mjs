@@ -5,6 +5,25 @@ export const DOCTOR_SCHEMA_VERSION = 1;
 
 const STATUS_RANK = { ok: 0, warning: 1, error: 2 };
 
+function hasUnresolvedCleanup(job) {
+  const hasAppServerOwnership =
+    Number.isFinite(job?.appServerPid) ||
+    Boolean(job?.appServerProcessIdentity) ||
+    Boolean(job?.appServerOwnershipSnapshot);
+  return (
+    job?.phase === "cleanup-pending" ||
+    (typeof job?.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+    job?.cleanupOutcome?.verified === false ||
+    job?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && job?.appServerCleanupOutcome?.verified !== true) ||
+    (job?.status === "cancelled" && Number.isFinite(job?.wslAgentPid) && job?.wslReap?.reaped !== true)
+  );
+}
+
+function isActiveJob(job) {
+  return job?.status === "queued" || job?.status === "running" || hasUnresolvedCleanup(job);
+}
+
 /**
  * Runs an ordered list of checks and aggregates them into a doctor report.
  * A check is { id, run } where run returns (or resolves to)
@@ -183,7 +202,7 @@ export function buildStateHygieneChecks(context) {
     {
       id: "jobs-cleanup-pending",
       run: () => {
-        const pending = jobs.filter((job) => job.phase === "cleanup-pending");
+        const pending = jobs.filter(hasUnresolvedCleanup);
         if (pending.length === 0) {
           return { status: "ok", message: "No jobs are waiting on unverified cleanup." };
         }
@@ -199,7 +218,7 @@ export function buildStateHygieneChecks(context) {
     {
       id: "jobs-likely-dead",
       run: () => {
-        const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
+        const active = jobs.filter(isActiveJob);
         if (active.length === 0) {
           return { status: "ok", message: "No active jobs." };
         }

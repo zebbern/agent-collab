@@ -4,7 +4,8 @@
 
 ## Checklist
 
-- [ ] `npm test` passes, verified by exit code (not by grepping output)
+- [ ] `npm run verify` passes every leg, verified by exit code (no
+      `UNVERIFIED` leg)
 - [ ] Chassis changes landed in BOTH `plugins/codex/scripts/lib/` and
       `plugins/cursor/scripts/lib/` (`process.mjs` stays byte-identical;
       intentional divergence updates the pin table in

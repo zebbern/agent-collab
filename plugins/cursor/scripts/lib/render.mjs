@@ -122,6 +122,23 @@ function pushSessionFooter(lines, threadId) {
   lines.push("", ...footer.split("\n"));
 }
 
+function requiresCleanup(job) {
+  const hasAppServerOwnership =
+    Number.isFinite(job?.appServerPid) ||
+    Boolean(job?.appServerProcessIdentity) ||
+    Boolean(job?.appServerOwnershipSnapshot);
+  return (
+    job?.status === "queued" ||
+    job?.status === "running" ||
+    job?.phase === "cleanup-pending" ||
+    (typeof job?.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+    job?.cleanupOutcome?.verified === false ||
+    job?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && job?.appServerCleanupOutcome?.verified !== true) ||
+    (job?.status === "cancelled" && Number.isFinite(job?.wslAgentPid) && job?.wslReap?.reaped !== true)
+  );
+}
+
 function formatTransportLabel(transport) {
   if (transport === "wsl") {
     return "cursor-agent via WSL";
@@ -138,7 +155,7 @@ function appendActiveJobsTable(lines, jobs) {
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const job of jobs) {
     const actions = [`/cursor:status ${job.id}`];
-    if (job.status === "queued" || job.status === "running") {
+    if (requiresCleanup(job)) {
       actions.push(`/cursor:cancel ${job.id}`);
     }
     const statusCell = job.liveness ? `${job.status} (${job.liveness})` : job.status;
@@ -178,13 +195,14 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
   }
-  if ((job.status === "queued" || job.status === "running") && options.showCancelHint) {
+  const cleanupRequired = requiresCleanup(job);
+  if (cleanupRequired && options.showCancelHint) {
     lines.push(`  Cancel: /cursor:cancel ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && options.showResultHint) {
+  if (!cleanupRequired && options.showResultHint) {
     lines.push(`  Result: /cursor:result ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
+  if (!cleanupRequired && job.jobClass === "task" && job.write && options.showReviewHint) {
     lines.push("  Review changes: /cursor:review --wait");
     lines.push("  Stricter review: /cursor:adversarial-review --wait");
   }
@@ -372,8 +390,8 @@ export function renderStatusReport(report) {
 export function renderJobStatusReport(job) {
   const lines = ["# Cursor Job Status", ""];
   pushJobDetails(lines, job, {
-    showElapsed: job.status === "queued" || job.status === "running",
-    showDuration: job.status !== "queued" && job.status !== "running",
+    showElapsed: requiresCleanup(job),
+    showDuration: !requiresCleanup(job),
     showLog: true,
     showCancelHint: true,
     showResultHint: true,

@@ -47,6 +47,21 @@ export type {
 export type ThreadStartParams = Omit<RawThreadStartParams, "persistExtendedHistory">;
 export type ThreadResumeParams = Omit<RawThreadResumeParams, "persistExtendedHistory">;
 
+export interface AppServerCleanupOutcome {
+  attempted: boolean;
+  delivered: boolean;
+  verified: boolean;
+  degraded: boolean;
+  method: string | null;
+  escalated: boolean;
+  targets: number[];
+  targetIdentities: string[];
+  survivors: number[];
+  survivorIdentities: string[];
+  identityMismatch?: boolean;
+  reason?: string;
+}
+
 export interface CodexAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   clientInfo?: ClientInfo;
@@ -57,6 +72,12 @@ export interface CodexAppServerClientOptions {
   gatedBrokerChild?: boolean;
   beforeAppServerActivation?: (ownershipSnapshot: unknown) => void | Promise<void>;
   afterAppServerOwnershipRefresh?: (ownershipSnapshot: unknown) => void | Promise<void>;
+  onAppServerOwnership?: (ownership: {
+    pid: number;
+    processIdentity: string;
+    ownershipSnapshot: unknown | null;
+  }) => void | Promise<void>;
+  onAppServerCleanupOutcome?: (outcome: AppServerCleanupOutcome) => void | Promise<void>;
 }
 
 export interface AppServerMethodMap {

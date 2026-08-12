@@ -14,15 +14,16 @@ import { spawn } from "node:child_process";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, run } from "./helpers.mjs";
-import { enqueueBackgroundTask, handleCancel, handleTaskWorker } from "../plugins/codex/scripts/codex-companion.mjs";
+import { enqueueBackgroundTask, handleCancel, handleTaskWorker, persistTaskAppServerCleanupOutcome, persistTaskAppServerOwnership } from "../plugins/codex/scripts/codex-companion.mjs";
 import { cleanupSessionJobs, handleSessionEnd, handleSessionStart } from "../plugins/codex/scripts/session-lifecycle-hook.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
+import { runAppServerClientOperation } from "../plugins/codex/scripts/lib/codex.mjs";
 import { isBrokerRequestAllowedDuringShutdown } from "../plugins/codex/scripts/app-server-broker.mjs";
 import { acquireBrokerRegistryLock, loadBrokerChildren, loadBrokerRegistration, publishBrokerChild, publishRegisteredBroker, registerBrokerOwner, releaseBrokerOwner, releaseBrokerRegistryLock, SESSION_OWNER_IDENTITY_ENV, SESSION_OWNER_PID_ENV } from "../plugins/codex/scripts/lib/broker-ownership.mjs";
 import { acquireBrokerLaunchLock, activateBrokerProcess, brokerLaunchLockPort, clearBrokerSession, ensureBrokerSession, loadBrokerSession, loadReusableBrokerSession, saveBrokerSession, sendBrokerShutdown, teardownBrokerSession, waitForBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { readStoredJob } from "../plugins/codex/scripts/lib/job-control.mjs";
+import { readStoredJob, resolveCancelableJob, resolveResultJob } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { captureProcessOwnership, getProcessIdentity, getWindowsProcessIdentity, hasLiveProcessIdentity, terminateProcessGroup, terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
-import { hasCancelFlag, listJobs, loadState, resolveStateDir, resolveStateFile, saveState, upsertJob, writeCancelFlag, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import { hasCancelFlag, listJobs, loadState, removeCancelFlag, resolveStateDir, resolveStateFile, saveState, upsertJob, writeCancelFlag, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 import { ROOT, SCRIPT, STOP_HOOK, SESSION_HOOK, BROKER_SCRIPT, SELF_EXPIRING_KEEPALIVE, selfExpiringKeepaliveCode, runtimePluginDataDir, makeTempDir, withBrokerOwner, waitFor, installSlowRejectFakeCodex, installInitializeErrorFakeCodex, instrumentSlowFakeTurnState, cleanupRuntimeBrokerSessions } from "./runtime-helpers.mjs";
 
@@ -1681,6 +1682,849 @@ test("task worker persists its own process identity and cancel verifies cleanup"
   assert.equal(cancelledJob.processIdentity, liveIdentity);
 });
 
+test("persistent cancel verifies canonical direct app-server and worker ownership", async () => {
+  const workspace = makeTempDir();
+  const workerSnapshot = {
+    rootPid: 41001,
+    rootIdentity: "41001@worker",
+    members: [{ pid: 41001, identity: "41001@worker", depth: 0 }]
+  };
+  const appServerSnapshot = {
+    rootPid: 42001,
+    rootIdentity: "42001@app-server",
+    members: [
+      { pid: 42002, identity: "42002@helper", depth: 1 },
+      { pid: 42001, identity: "42001@app-server", depth: 0 }
+    ]
+  };
+  const job = {
+    id: "task-persistent-owned-roots",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: workerSnapshot.rootPid,
+    processIdentity: workerSnapshot.rootIdentity,
+    ownershipSnapshot: workerSnapshot,
+    appServerPid: appServerSnapshot.rootPid,
+    appServerProcessIdentity: appServerSnapshot.rootIdentity,
+    appServerOwnershipSnapshot: appServerSnapshot,
+    createdAt: "2026-07-28T08:03:00.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  // Progress-file writes are intentionally not authoritative for ownership.
+  // A stale file must not override the lock-serialized state index.
+  writeJobFile(workspace, job.id, {
+    ...job,
+    appServerPid: 42999,
+    appServerProcessIdentity: "42999@stale",
+    appServerOwnershipSnapshot: null
+  });
+
+  const cleanupCalls = [];
+  const verifiedCleanup = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl(pid, options) {
+      cleanupCalls.push({ kind: "group", pid, options });
+      return verifiedCleanup;
+    },
+    async terminateProcessTreeImpl(pid, options) {
+      cleanupCalls.push({ kind: "tree", pid, options });
+      return verifiedCleanup;
+    }
+  });
+
+  assert.equal(cleanupCalls.length, 2);
+  assert.equal(cleanupCalls[0].kind, "group");
+  assert.equal(cleanupCalls[0].pid, appServerSnapshot.rootPid);
+  assert.deepEqual(cleanupCalls[0].options.ownershipSnapshot, appServerSnapshot);
+  assert.equal(cleanupCalls[1].kind, "tree");
+  assert.equal(cleanupCalls[1].pid, workerSnapshot.rootPid);
+  assert.equal(cleanupCalls[1].options.expectedRootIdentity, workerSnapshot.rootIdentity);
+  assert.deepEqual(cleanupCalls[1].options.ownershipSnapshot, workerSnapshot);
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+});
+
+test("concurrent persistent cancels keep verified root cleanup monotonic", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-concurrent-cancel",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 42501,
+    processIdentity: "42501@worker",
+    ownershipSnapshot: {
+      rootPid: 42501,
+      rootIdentity: "42501@worker",
+      members: [{ pid: 42501, identity: "42501@worker", depth: 0 }]
+    },
+    appServerPid: 42502,
+    appServerProcessIdentity: "42502@app-server",
+    appServerOwnershipSnapshot: {
+      rootPid: 42502,
+      rootIdentity: "42502@app-server",
+      members: [{ pid: 42502, identity: "42502@app-server", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:03:30.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  /** @type {() => void} */
+  let markSlowStarted = () => {};
+  const slowStarted = new Promise((resolve) => {
+    markSlowStarted = resolve;
+  });
+  /** @type {(outcome: object) => void} */
+  let releaseSlow = () => {};
+  const slowOutcome = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  const verified = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+
+  const slowCancel = handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl() {
+      markSlowStarted();
+      return slowOutcome;
+    },
+    async terminateProcessTreeImpl() {
+      return verified;
+    }
+  });
+  await slowStarted;
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl() {
+      return verified;
+    },
+    async terminateProcessTreeImpl() {
+      return verified;
+    }
+  });
+  releaseSlow({
+    attempted: true,
+    delivered: false,
+    verified: false,
+    degraded: true,
+    survivors: [job.appServerPid],
+    survivorIdentities: [job.appServerProcessIdentity]
+  });
+  await slowCancel;
+
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(workspace, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cancelled");
+    assert.equal(record.cleanupFailure, null);
+    assert.equal(record.cleanupOutcome.verified, true);
+    assert.equal(record.appServerCleanupOutcome.verified, true);
+  }
+});
+
+test("persistent cancel cleans app-server ownership published during worker teardown", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-late-app-server-owner",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 42601,
+    processIdentity: "42601@worker",
+    ownershipSnapshot: {
+      rootPid: 42601,
+      rootIdentity: "42601@worker",
+      members: [{ pid: 42601, identity: "42601@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:03:35.000Z"
+  };
+  const lateAppOwnership = {
+    pid: 42602,
+    processIdentity: "42602@app-server",
+    ownershipSnapshot: {
+      rootPid: 42602,
+      rootIdentity: "42602@app-server",
+      members: [{ pid: 42602, identity: "42602@app-server", depth: 0 }]
+    }
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const verified = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+  let published = false;
+  let workerCleanupCalls = 0;
+  const appCleanupPids = [];
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl(pid) {
+      appCleanupPids.push(pid);
+      return verified;
+    },
+    async terminateProcessTreeImpl() {
+      workerCleanupCalls += 1;
+      if (!published) {
+        published = true;
+        persistTaskAppServerOwnership(workspace, job.id, lateAppOwnership);
+      }
+      return verified;
+    }
+  });
+
+  assert.deepEqual(appCleanupPids, [lateAppOwnership.pid]);
+  assert.equal(workerCleanupCalls, 2);
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(workspace, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cancelled");
+    assert.equal(record.appServerPid, lateAppOwnership.pid);
+    assert.equal(record.appServerCleanupOutcome.verified, true);
+    assert.equal(record.cleanupOutcome.verified, true);
+  }
+});
+
+test("first app-server ownership published after cancellation reopens both stores", () => {
+  const workspace = makeTempDir();
+  const verified = { attempted: true, delivered: true, verified: true };
+  const job = {
+    id: "task-persistent-post-cancel-app-owner",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    processIdentity: "42621@worker",
+    cleanupOutcome: verified,
+    cleanupFailure: null,
+    createdAt: "2026-07-28T08:03:38.000Z"
+  };
+  const ownership = {
+    pid: 42622,
+    processIdentity: "42622@app-server",
+    ownershipSnapshot: {
+      rootPid: 42622,
+      rootIdentity: "42622@app-server",
+      members: [{ pid: 42622, identity: "42622@app-server", depth: 0 }]
+    }
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  persistTaskAppServerOwnership(workspace, job.id, ownership);
+
+  for (const record of [
+    loadState(workspace).jobs.find((candidate) => candidate.id === job.id),
+    readStoredJob(workspace, job.id)
+  ]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.appServerPid, ownership.pid);
+    assert.equal(record.appServerCleanupOutcome, null);
+  }
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+});
+
+test("persistent cancel stays retryable when late app-server ownership cannot be cleaned", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-late-app-server-unverified",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 42611,
+    processIdentity: "42611@worker",
+    ownershipSnapshot: {
+      rootPid: 42611,
+      rootIdentity: "42611@worker",
+      members: [{ pid: 42611, identity: "42611@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:03:37.000Z"
+  };
+  const lateAppOwnership = {
+    pid: 42612,
+    processIdentity: "42612@app-server",
+    ownershipSnapshot: {
+      rootPid: 42612,
+      rootIdentity: "42612@app-server",
+      members: [{ pid: 42612, identity: "42612@app-server", depth: 0 }]
+    }
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  let published = false;
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", workspace, "--json"], {
+      platform: "linux",
+      async terminateProcessGroupImpl() {
+        return {
+          attempted: true,
+          delivered: false,
+          verified: false,
+          degraded: true,
+          survivors: [lateAppOwnership.pid],
+          survivorIdentities: [lateAppOwnership.processIdentity]
+        };
+      },
+      async terminateProcessTreeImpl() {
+        if (!published) {
+          published = true;
+          persistTaskAppServerOwnership(workspace, job.id, lateAppOwnership);
+        }
+        return {
+          attempted: true,
+          delivered: true,
+          verified: true,
+          degraded: false,
+          survivors: [],
+          survivorIdentities: []
+        };
+      }
+    }),
+    /ownership records were preserved for retry/
+  );
+
+  for (const record of [
+    loadState(workspace).jobs.find((candidate) => candidate.id === job.id),
+    readStoredJob(workspace, job.id)
+  ]) {
+    assert.equal(record.status, "running");
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.appServerPid, lateAppOwnership.pid);
+    assert.equal(record.appServerCleanupOutcome.verified, false);
+  }
+});
+
+test("an expanded app-server ownership snapshot reopens cancellation and cleans new members", async () => {
+  const workspace = makeTempDir();
+  const verified = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+  const firstSnapshot = {
+    rootPid: 42702,
+    rootIdentity: "42702@app-server",
+    processGroupId: 42702,
+    sessionId: 42702,
+    members: [{ pid: 42702, identity: "42702@app-server", depth: 0 }]
+  };
+  const expandedSnapshot = {
+    ...firstSnapshot,
+    members: [
+      ...firstSnapshot.members,
+      { pid: 42703, identity: "42703@helper", depth: 1 }
+    ]
+  };
+  const job = {
+    id: "task-persistent-expanded-app-owner",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    processIdentity: "42701@worker",
+    cleanupOutcome: verified,
+    appServerPid: firstSnapshot.rootPid,
+    appServerProcessIdentity: firstSnapshot.rootIdentity,
+    appServerOwnershipSnapshot: firstSnapshot,
+    appServerCleanupOutcome: verified,
+    cleanupFailure: null,
+    createdAt: "2026-07-28T08:03:40.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  persistTaskAppServerOwnership(workspace, job.id, {
+    pid: expandedSnapshot.rootPid,
+    processIdentity: expandedSnapshot.rootIdentity,
+    ownershipSnapshot: expandedSnapshot
+  });
+
+  for (const record of [
+    loadState(workspace).jobs.find((candidate) => candidate.id === job.id),
+    readStoredJob(workspace, job.id)
+  ]) {
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.appServerCleanupOutcome, null);
+    assert.deepEqual(record.appServerOwnershipSnapshot, expandedSnapshot);
+  }
+
+  const cleanedSnapshots = [];
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl(pid, options) {
+      assert.equal(pid, expandedSnapshot.rootPid);
+      cleanedSnapshots.push(options.ownershipSnapshot);
+      return verified;
+    },
+    async terminateProcessTreeImpl() {
+      assert.fail("the already verified worker generation must not be cleaned again");
+    }
+  });
+
+  assert.deepEqual(cleanedSnapshots, [expandedSnapshot]);
+  const cancelled = readStoredJob(workspace, job.id);
+  assert.equal(cancelled.phase, "cancelled");
+  assert.equal(cancelled.appServerCleanupOutcome.verified, true);
+});
+
+test("stale job-file cleanup cannot verify a newer app-server ownership snapshot", () => {
+  const workspace = makeTempDir();
+  const verified = { attempted: true, delivered: true, verified: true };
+  const firstSnapshot = {
+    rootPid: 42802,
+    rootIdentity: "42802@app-server",
+    processGroupId: 42802,
+    sessionId: 42802,
+    members: [{ pid: 42802, identity: "42802@app-server", depth: 0 }]
+  };
+  const expandedSnapshot = {
+    ...firstSnapshot,
+    members: [
+      ...firstSnapshot.members,
+      { pid: 42803, identity: "42803@helper", depth: 1 }
+    ]
+  };
+  const job = {
+    id: "task-persistent-stale-app-cleanup-file",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "cleanup-pending",
+    pid: 42801,
+    processIdentity: "42801@worker",
+    appServerPid: firstSnapshot.rootPid,
+    appServerProcessIdentity: firstSnapshot.rootIdentity,
+    appServerOwnershipSnapshot: firstSnapshot,
+    appServerCleanupOutcome: verified,
+    createdAt: "2026-07-28T08:03:45.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  persistTaskAppServerOwnership(workspace, job.id, {
+    pid: expandedSnapshot.rootPid,
+    processIdentity: expandedSnapshot.rootIdentity,
+    ownershipSnapshot: expandedSnapshot
+  });
+
+  // Simulate an unlocked progress writer landing its stale whole-file sample
+  // after the canonical ownership refresh.
+  writeJobFile(workspace, job.id, job);
+  persistTaskAppServerCleanupOutcome(workspace, job.id, {
+    attempted: true,
+    delivered: false,
+    verified: false,
+    degraded: true,
+    survivors: [expandedSnapshot.rootPid]
+  });
+
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(workspace, job.id);
+  for (const record of [indexed, stored]) {
+    assert.deepEqual(record.appServerOwnershipSnapshot, expandedSnapshot);
+    assert.notEqual(record.appServerCleanupOutcome?.verified, true);
+  }
+});
+
+test("persistent cancel preserves both ownership records when app-server cleanup is unverified", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-unverified-app-server",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 43001,
+    processIdentity: "43001@worker",
+    ownershipSnapshot: {
+      rootPid: 43001,
+      rootIdentity: "43001@worker",
+      members: [{ pid: 43001, identity: "43001@worker", depth: 0 }]
+    },
+    appServerPid: 44001,
+    appServerProcessIdentity: "44001@app-server",
+    appServerOwnershipSnapshot: {
+      rootPid: 44001,
+      rootIdentity: "44001@app-server",
+      members: [{ pid: 44001, identity: "44001@app-server", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:04:00.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  const cleanupCalls = [];
+  let appServerCleanupAttempts = 0;
+
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", workspace, "--json"], {
+      platform: "linux",
+      async terminateProcessGroupImpl(pid) {
+        cleanupCalls.push(pid);
+        appServerCleanupAttempts += 1;
+        const failed = {
+          ...readStoredJob(workspace, job.id),
+          status: "failed",
+          phase: "failed",
+          pid: null,
+          errorMessage: "worker observed the app-server exit"
+        };
+        writeJobFile(workspace, job.id, failed);
+        upsertJob(workspace, failed);
+        return {
+          attempted: true,
+          delivered: true,
+          verified: false,
+          degraded: true,
+          survivors: [pid],
+          survivorIdentities: [job.appServerProcessIdentity]
+        };
+      },
+      async terminateProcessTreeImpl(pid) {
+        cleanupCalls.push(pid);
+        return {
+          attempted: true,
+          delivered: true,
+          verified: true,
+          degraded: false,
+          survivors: [],
+          survivorIdentities: []
+        };
+      }
+    }),
+    /ownership records were preserved for retry/
+  );
+
+  assert.deepEqual(cleanupCalls, [job.appServerPid, job.pid]);
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(stored.pid, job.pid);
+  assert.equal(stored.processIdentity, job.processIdentity);
+  assert.equal(stored.appServerPid, job.appServerPid);
+  assert.equal(stored.appServerProcessIdentity, job.appServerProcessIdentity);
+  assert.equal(stored.appServerCleanupOutcome.verified, false);
+  assert.equal(stored.cleanupOutcome.verified, true);
+
+  const lateWorkerFailure = {
+    ...stored,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage: "late worker failure overwrote the cleanup phase"
+  };
+  writeJobFile(workspace, job.id, lateWorkerFailure);
+  upsertJob(workspace, lateWorkerFailure);
+
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl() {
+      appServerCleanupAttempts += 1;
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    },
+    async terminateProcessTreeImpl() {
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    }
+  });
+  const retried = readStoredJob(workspace, job.id);
+  assert.equal(retried.status, "cancelled");
+  assert.equal(retried.cleanupOutcome.verified, true);
+  assert.equal(retried.appServerCleanupOutcome.verified, true);
+  assert.equal(appServerCleanupAttempts, 2);
+  assert.throws(() => resolveCancelableJob(workspace, job.id), /already cancelled/);
+  assert.equal(resolveResultJob(workspace, job.id).job.id, job.id);
+});
+
+test("persistent cancel still cleans a durable app-server after its worker pid is gone", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-app-server-only",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: null,
+    appServerPid: 45001,
+    appServerProcessIdentity: "45001@app-server",
+    appServerOwnershipSnapshot: {
+      rootPid: 45001,
+      rootIdentity: "45001@app-server",
+      members: [{ pid: 45001, identity: "45001@app-server", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:05:00.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  const cleanupCalls = [];
+
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl(pid) {
+      cleanupCalls.push(pid);
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    }
+  });
+
+  assert.deepEqual(cleanupCalls, [job.appServerPid]);
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+});
+
+test("persistent cancel does not retry an app-server root whose cleanup already verified", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-app-clean-worker-retry",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: 43501,
+    processIdentity: "43501@win32:111111",
+    appServerPid: 44501,
+    appServerProcessIdentity: "44501@win32:222222",
+    appServerCleanupOutcome: { attempted: true, delivered: true, verified: true },
+    cleanupOutcome: { attempted: true, delivered: true, verified: false },
+    cleanupFailure: "worker cleanup remains unverified",
+    createdAt: "2026-07-28T08:04:30.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  const probes = [];
+  const cleanupPids = [];
+
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "win32",
+    async terminateProcessTreeImpl(pid) {
+      cleanupPids.push(pid);
+      return { attempted: true, delivered: true, verified: true, survivors: [] };
+    },
+    probeWindowsProcessIdentityImpl(pid) {
+      probes.push(pid);
+      return { status: "absent", identity: null };
+    }
+  });
+
+  assert.deepEqual(cleanupPids, [job.pid]);
+  assert.deepEqual(probes, []);
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+});
+
+test("persistent Windows cancel rejects an app-server root that vanishes before recursive cleanup", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-app-root-race",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: null,
+    appServerPid: 44502,
+    appServerProcessIdentity: "44502@win32:222222",
+    appServerCleanupOutcome: { attempted: false, delivered: false, verified: false },
+    cleanupFailure: "app-server cleanup remains unverified",
+    createdAt: "2026-07-28T08:04:40.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", workspace, "--json"], {
+      platform: "win32",
+      probeWindowsProcessIdentityImpl() {
+        return { status: "ok", identity: job.appServerProcessIdentity };
+      },
+      async terminateProcessTreeImpl() {
+        return {
+          attempted: false,
+          delivered: false,
+          verified: true,
+          degraded: false,
+          method: "identity-check",
+          survivors: []
+        };
+      }
+    }),
+    /ownership records were preserved for retry/
+  );
+
+  const retained = readStoredJob(workspace, job.id);
+  assert.equal(retained.status, "failed");
+  assert.equal(retained.phase, "cleanup-pending");
+  assert.equal(retained.appServerCleanupOutcome.verified, false);
+  assert.equal(retained.appServerPid, job.appServerPid);
+});
+
+test("persistent Windows cancel accepts a delivered verified recursive app-server cleanup", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-app-root-recursive-cleanup",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: null,
+    appServerPid: 44503,
+    appServerProcessIdentity: "44503@win32:333333",
+    appServerCleanupOutcome: { attempted: false, delivered: false, verified: false },
+    cleanupFailure: "app-server cleanup remains unverified",
+    createdAt: "2026-07-28T08:04:45.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "win32",
+    probeWindowsProcessIdentityImpl() {
+      return { status: "ok", identity: job.appServerProcessIdentity };
+    },
+    async terminateProcessTreeImpl() {
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        method: "taskkill",
+        survivors: []
+      };
+    }
+  });
+
+  const cancelled = readStoredJob(workspace, job.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.appServerCleanupOutcome.verified, true);
+});
+
+test("persistent cancel does not retry a worker root whose cleanup already verified", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-persistent-worker-clean-app-retry",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: 43502,
+    processIdentity: "43502@worker",
+    appServerPid: 44502,
+    appServerProcessIdentity: "44502@app-server",
+    appServerOwnershipSnapshot: {
+      rootPid: 44502,
+      rootIdentity: "44502@app-server",
+      members: [{ pid: 44502, identity: "44502@app-server", depth: 0 }]
+    },
+    appServerCleanupOutcome: { attempted: true, delivered: false, verified: false },
+    cleanupOutcome: { attempted: true, delivered: true, verified: true },
+    cleanupFailure: "app-server cleanup remains unverified",
+    createdAt: "2026-07-28T08:04:40.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  const cleanupPids = [];
+
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    platform: "linux",
+    async terminateProcessGroupImpl(pid) {
+      cleanupPids.push(pid);
+      return { attempted: true, delivered: true, verified: true, survivors: [] };
+    },
+    async terminateProcessTreeImpl() {
+      throw new Error("already verified worker must not be retried");
+    }
+  });
+
+  assert.deepEqual(cleanupPids, [job.appServerPid]);
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+});
+
 test("cancel stops an active background job and marks it cancelled", async (t) => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
@@ -1834,7 +2678,7 @@ test("cancelling a queued pid-less job prevents its worker from performing work"
   assert.equal(fs.existsSync(workMarker), false);
 });
 
-test("session cleanup preserves a queued cancel between worker read and pid publication", async () => {
+test("session cleanup preserves a queued cancel for a legacy session-scoped worker startup race", async () => {
   const workspace = makeTempDir();
   const sessionId = "sess-queued-worker-race";
   const job = {
@@ -1856,9 +2700,18 @@ test("session cleanup preserves a queued cancel between worker read and pid publ
   let firstCleanupPromise = null;
   let cancelFlagSurvivedCleanup = false;
 
-  enqueueBackgroundTask(workspace, job, request, {
-    spawnDetachedTaskWorkerImpl() {}
-  });
+  // Records created before persistent task lifetime was introduced have no
+  // sessionLifetime marker. Keep their SessionEnd cancellation race safe
+  // without weakening the new contract for freshly enqueued tasks.
+  const legacyQueuedRecord = {
+    ...job,
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    request
+  };
+  writeJobFile(workspace, job.id, legacyQueuedRecord);
+  upsertJob(workspace, legacyQueuedRecord);
   const queuedState = loadState(workspace);
   const queuedJob = queuedState.jobs.find((candidate) => candidate.id === job.id);
   const newerJobs = Array.from({ length: 50 }, (_, index) => ({
@@ -1915,6 +2768,418 @@ test("session cleanup preserves a queued cancel between worker read and pid publ
   assert.equal(hasCancelFlag(workspace, job.id), false);
 });
 
+test("session cleanup leaves companion-enqueued background tasks running", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-persistent-background";
+  const job = {
+    id: "task-persistent-background",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    summary: "Continue after SessionEnd",
+    sessionId,
+    createdAt: "2026-07-28T08:03:30.000Z"
+  };
+
+  enqueueBackgroundTask(
+    workspace,
+    job,
+    {
+      cwd: workspace,
+      prompt: "Continue after SessionEnd",
+      jobId: job.id
+    },
+    {
+      spawnDetachedTaskWorkerImpl() {}
+    }
+  );
+
+  let terminateCalled = false;
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    terminateProcessTreeImpl() {
+      terminateCalled = true;
+      throw new Error("a persistent task must not be terminated");
+    }
+  });
+
+  assert.equal(cleanup.verified, true);
+  assert.equal(terminateCalled, false);
+  assert.equal(hasCancelFlag(workspace, job.id), false);
+  assert.equal(readStoredJob(workspace, job.id)?.status, "queued");
+  assert.deepEqual(loadState(workspace).jobs.map((candidate) => candidate.id), [job.id]);
+});
+
+test("session cleanup merges against fresh state after process termination awaits", async () => {
+  const workspace = makeTempDir();
+  const endingSessionId = "sess-ending-cleanup";
+  const endingJob = {
+    id: "review-ending-session",
+    workspaceRoot: workspace,
+    kind: "review",
+    title: "Codex Review",
+    jobClass: "review",
+    sessionId: endingSessionId,
+    status: "running",
+    phase: "running",
+    pid: 41001,
+    processIdentity: "41001@Mon Jul 28 08:04:00 2026",
+    createdAt: "2026-07-28T08:04:00.000Z"
+  };
+  const persistentJob = {
+    id: "task-persistent-concurrent",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionId: endingSessionId,
+    sessionLifetime: "persistent",
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    createdAt: "2026-07-28T08:04:30.000Z"
+  };
+  for (const job of [endingJob, persistentJob]) {
+    writeJobFile(workspace, job.id, job);
+    upsertJob(workspace, job);
+  }
+
+  const concurrentJob = {
+    id: "task-new-session-concurrent",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionId: "sess-new",
+    sessionLifetime: "persistent",
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    createdAt: "2026-07-28T08:05:00.000Z"
+  };
+
+  const cleanup = await cleanupSessionJobs(workspace, endingSessionId, {
+    async terminateProcessTreeImpl() {
+      const runningPersistent = {
+        ...persistentJob,
+        status: "running",
+        phase: "starting",
+        pid: 41999,
+        processIdentity: "41999@Mon Jul 28 08:05:01 2026"
+      };
+      writeJobFile(workspace, persistentJob.id, runningPersistent);
+      upsertJob(workspace, runningPersistent);
+      writeJobFile(workspace, concurrentJob.id, concurrentJob);
+      upsertJob(workspace, concurrentJob);
+      return { attempted: true, delivered: true, verified: true };
+    }
+  });
+
+  assert.equal(cleanup.verified, true);
+  const jobs = loadState(workspace).jobs;
+  assert.equal(jobs.some((job) => job.id === endingJob.id), false);
+  const retainedPersistent = jobs.find((job) => job.id === persistentJob.id);
+  assert.equal(retainedPersistent?.status, "running");
+  assert.equal(retainedPersistent?.pid, 41999);
+  assert.equal(retainedPersistent?.sessionLifetime, "persistent");
+  assert.equal(jobs.some((job) => job.id === concurrentJob.id), true);
+  assert.equal(readStoredJob(workspace, concurrentJob.id)?.status, "queued");
+});
+
+test("session cleanup preserves a terminal race when process cleanup is unverified", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-terminal-cleanup-race";
+  const job = {
+    id: "review-terminal-cleanup-race",
+    workspaceRoot: workspace,
+    kind: "review",
+    title: "Codex Review",
+    jobClass: "review",
+    sessionId,
+    status: "running",
+    phase: "running",
+    pid: 47001,
+    processIdentity: "47001@worker",
+    ownershipSnapshot: {
+      rootPid: 47001,
+      rootIdentity: "47001@worker",
+      members: [{ pid: 47001, identity: "47001@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:05:30.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    async terminateProcessTreeImpl() {
+      const terminal = {
+        ...readStoredJob(workspace, job.id),
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        errorMessage: "worker failed while SessionEnd was cleaning it"
+      };
+      writeJobFile(workspace, job.id, terminal);
+      upsertJob(workspace, terminal);
+      return {
+        attempted: true,
+        delivered: true,
+        verified: false,
+        degraded: true,
+        survivors: [47001],
+        survivorIdentities: [job.processIdentity]
+      };
+    }
+  });
+
+  assert.equal(cleanup.verified, false);
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  assert.equal(indexed.status, "failed");
+  assert.equal(indexed.phase, "cleanup-pending");
+  assert.equal(indexed.pid, job.pid);
+  assert.equal(indexed.cleanupOutcome.verified, false);
+  assert.equal(indexed.processIdentity, job.processIdentity);
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(stored.cleanupOutcome.verified, false);
+});
+
+test("session cleanup retries a pre-existing terminal cleanup-pending job", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-existing-cleanup-pending";
+  const job = {
+    id: "review-existing-cleanup-pending",
+    workspaceRoot: workspace,
+    kind: "review",
+    title: "Codex Review",
+    jobClass: "review",
+    sessionId,
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: null,
+    processIdentity: "47101@worker",
+    ownershipSnapshot: {
+      rootPid: 47101,
+      rootIdentity: "47101@worker",
+      members: [{ pid: 47101, identity: "47101@worker", depth: 0 }]
+    },
+    cleanupOutcome: { attempted: true, delivered: false, verified: false, survivors: [47101] },
+    cleanupFailure: "prior cleanup was unverified",
+    createdAt: "2026-07-28T08:05:45.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  let cleanupCalls = 0;
+
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    async terminateProcessTreeImpl(pid, options) {
+      cleanupCalls += 1;
+      assert.equal(Number.isNaN(pid), true);
+      assert.equal(options.ownershipSnapshot.rootPid, 47101);
+      return {
+        attempted: true,
+        delivered: true,
+        verified: false,
+        degraded: true,
+        survivors: [47101],
+        survivorIdentities: [job.processIdentity]
+      };
+    }
+  });
+
+  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanup.verified, false);
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  assert.equal(indexed.status, "failed");
+  assert.equal(indexed.phase, "cleanup-pending");
+  assert.equal(indexed.cleanupOutcome.verified, false);
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+  assert.equal(readStoredJob(workspace, job.id)?.cleanupOutcome.verified, false);
+});
+
+test("session cleanup reports verified when a queued worker acknowledges cancellation before merge", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-queued-cancel-ack";
+  const job = {
+    id: "task-queued-cancel-ack",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionId,
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    createdAt: "2026-07-28T08:05:50.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    writeCancelFlagImpl(root, id) {
+      writeCancelFlag(root, id);
+      const terminal = {
+        ...job,
+        status: "cancelled",
+        phase: "cancelled",
+        completedAt: "2026-07-28T08:05:51.000Z"
+      };
+      writeJobFile(root, id, terminal);
+      upsertJob(root, terminal);
+    }
+  });
+
+  assert.equal(cleanup.verified, true);
+  assert.equal(loadState(workspace).jobs.some((candidate) => candidate.id === job.id), false);
+  assert.equal(readStoredJob(workspace, job.id), null);
+});
+
+test("session cleanup reports verified after another cleanup removes an acknowledged queued job", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-queued-cancel-concurrent-removal";
+  const job = {
+    id: "task-queued-cancel-concurrent-removal",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionId,
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    createdAt: "2026-07-28T08:05:55.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    writeCancelFlagImpl(root, id) {
+      writeCancelFlag(root, id);
+      const terminal = { ...job, status: "cancelled", phase: "cancelled", completedAt: "2026-07-28T08:05:56.000Z" };
+      writeJobFile(root, id, terminal);
+      upsertJob(root, terminal);
+      removeCancelFlag(root, id);
+      saveState(root, { ...loadState(root), jobs: [] });
+    }
+  });
+
+  assert.equal(cleanup.verified, true);
+  assert.equal(loadState(workspace).jobs.length, 0);
+  assert.equal(hasCancelFlag(workspace, job.id), false);
+});
+
+test("session cleanup accepts another cleanup's verified removal while its own teardown is unverified", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-owned-concurrent-cleanup";
+  const job = {
+    id: "review-owned-concurrent-cleanup",
+    workspaceRoot: workspace,
+    kind: "review",
+    title: "Codex Review",
+    jobClass: "review",
+    sessionId,
+    status: "running",
+    phase: "running",
+    pid: 47201,
+    processIdentity: "47201@worker",
+    ownershipSnapshot: {
+      rootPid: 47201,
+      rootIdentity: "47201@worker",
+      members: [{ pid: 47201, identity: "47201@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:05:57.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  let innerCleanup = null;
+  const outerCleanup = await cleanupSessionJobs(workspace, sessionId, {
+    async terminateProcessTreeImpl() {
+      innerCleanup = await cleanupSessionJobs(workspace, sessionId, {
+        async terminateProcessTreeImpl() {
+          return { attempted: true, delivered: true, verified: true };
+        }
+      });
+      return {
+        attempted: true,
+        delivered: false,
+        verified: false,
+        degraded: true,
+        survivors: [job.pid],
+        survivorIdentities: [job.processIdentity]
+      };
+    }
+  });
+
+  assert.equal(innerCleanup?.verified, true);
+  assert.equal(outerCleanup.verified, true);
+  assert.equal(loadState(workspace).jobs.some((candidate) => candidate.id === job.id), false);
+  assert.equal(readStoredJob(workspace, job.id), null);
+  assert.equal(hasCancelFlag(workspace, job.id), false);
+});
+
+test("state pruning preserves an unverified SessionEnd job and its ownership file", async () => {
+  const workspace = makeTempDir();
+  const sessionId = "sess-unverified-prune";
+  const job = {
+    id: "review-unverified-prune",
+    workspaceRoot: workspace,
+    kind: "review",
+    title: "Codex Review",
+    jobClass: "review",
+    sessionId,
+    status: "running",
+    phase: "running",
+    pid: 47301,
+    processIdentity: "47301@worker",
+    ownershipSnapshot: {
+      rootPid: 47301,
+      rootIdentity: "47301@worker",
+      members: [{ pid: 47301, identity: "47301@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T07:00:00.000Z",
+    updatedAt: "2026-07-28T07:00:00.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+  for (let index = 0; index < 50; index += 1) {
+    upsertJob(workspace, {
+      id: `terminal-prune-${index}`,
+      status: "completed",
+      phase: "done",
+      createdAt: new Date(Date.UTC(2026, 6, 28, 8, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 6, 28, 8, index)).toISOString()
+    });
+  }
+
+  const cleanup = await cleanupSessionJobs(workspace, sessionId, {
+    async terminateProcessTreeImpl() {
+      return {
+        attempted: true,
+        delivered: true,
+        verified: false,
+        degraded: true,
+        survivors: [job.pid],
+        survivorIdentities: [job.processIdentity]
+      };
+    }
+  });
+
+  assert.equal(cleanup.verified, false);
+  const retained = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  assert.equal(retained?.phase, "cleanup-pending");
+  assert.equal(retained?.cleanupOutcome?.verified, false);
+  assert.equal(readStoredJob(workspace, job.id)?.processIdentity, job.processIdentity);
+
+  const retry = await cleanupSessionJobs(workspace, sessionId, {
+    async terminateProcessTreeImpl() {
+      return { attempted: true, delivered: false, verified: false, survivors: [job.pid] };
+    }
+  });
+  assert.equal(retry.verified, false);
+});
+
 test("worker converges a flagged running record to cancelled", async () => {
   const workspace = makeTempDir();
   const job = {
@@ -1964,6 +3229,396 @@ test("worker converges a flagged running record to cancelled", async () => {
   });
   assert.equal(readStoredJob(workspace, job.id), null);
   assert.equal(hasCancelFlag(workspace, job.id), false);
+});
+
+test("tracked jobs retain a completed result while direct app-server cleanup remains retryable", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-completed-cleanup-pending",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "queued",
+    phase: "queued",
+    appServerPid: 47201,
+    appServerProcessIdentity: "47201@app-server",
+    createdAt: "2026-07-28T08:06:00.000Z"
+  };
+  const cleanupOutcome = {
+    attempted: true,
+    delivered: true,
+    verified: false,
+    survivors: [47201],
+    survivorIdentities: [job.appServerProcessIdentity]
+  };
+  const completedResult = {
+    exitStatus: 0,
+    threadId: "thr_completed_cleanup_pending",
+    turnId: "turn_completed_cleanup_pending",
+    payload: { ok: true },
+    rendered: "completed before cleanup failed",
+    summary: "completed task"
+  };
+  const client = {
+    transport: "direct",
+    ownershipPublished: true,
+    cleanupOutcome: null,
+    async close() {
+      this.cleanupOutcome = cleanupOutcome;
+    }
+  };
+
+  await assert.rejects(
+    runTrackedJob(job, () => runAppServerClientOperation(client, async () => completedResult)),
+    (error) => error.code === "APP_SERVER_CLEANUP_UNVERIFIED"
+  );
+
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(Number.isFinite(stored.pid), true);
+  assert.equal(stored.threadId, completedResult.threadId);
+  assert.deepEqual(stored.result, completedResult.payload);
+  assert.equal(stored.appServerCleanupOutcome.verified, false);
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+  assert.throws(() => resolveResultJob(workspace, job.id), /still completed/);
+});
+
+test("tracked jobs retain a failed turn while direct app-server cleanup remains retryable", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-failed-cleanup-pending",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "queued",
+    phase: "queued",
+    appServerPid: 47202,
+    appServerProcessIdentity: "47202@app-server",
+    createdAt: "2026-07-28T08:06:10.000Z"
+  };
+  const cleanupOutcome = {
+    attempted: true,
+    delivered: true,
+    verified: false,
+    survivors: [47202],
+    survivorIdentities: [job.appServerProcessIdentity]
+  };
+  const operationError = new Error("turn failed before completion");
+  operationError.code = "TURN_FAILED";
+  const client = {
+    transport: "direct",
+    ownershipPublished: true,
+    cleanupOutcome: null,
+    async close() {
+      this.cleanupOutcome = cleanupOutcome;
+    }
+  };
+
+  await assert.rejects(
+    runTrackedJob(job, () =>
+      runAppServerClientOperation(client, async () => {
+        throw operationError;
+      })
+    ),
+    (error) => error === operationError
+  );
+
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(stored.errorMessage, operationError.message);
+  assert.equal(stored.appServerCleanupOutcome.verified, false);
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+});
+
+test("a late tracked-job failure preserves cleanup evidence already persisted by cancel", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-late-failure-after-cancel",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    pid: 47203,
+    processIdentity: "47203@worker",
+    createdAt: "2026-07-28T08:06:20.000Z"
+  };
+  const cleanupOutcome = {
+    attempted: true,
+    delivered: true,
+    verified: false,
+    survivors: [job.pid],
+    survivorIdentities: [job.processIdentity]
+  };
+
+  await assert.rejects(
+    runTrackedJob(job, async () => {
+      const pending = {
+        ...readStoredJob(workspace, job.id),
+        phase: "cleanup-pending",
+        cleanupOutcome,
+        cleanupFailure: "cancel could not verify worker cleanup"
+      };
+      writeJobFile(workspace, job.id, pending);
+      upsertJob(workspace, pending);
+      throw new Error("worker failed after cancel started");
+    }),
+    /worker failed after cancel started/
+  );
+
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(stored.pid, process.pid);
+  assert.equal(stored.cleanupOutcome.verified, false);
+  assert.match(stored.cleanupFailure, /cancel could not verify/);
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+});
+
+test("a stale app-server cleanup error cannot downgrade canonical verified cleanup", async () => {
+  const workspace = makeTempDir();
+  const verifiedAppCleanup = { attempted: true, delivered: true, verified: true, method: "taskkill" };
+  const job = {
+    id: "task-stale-app-cleanup-error",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "running",
+    phase: "cleanup-pending",
+    pid: process.pid,
+    cleanupOutcome: { attempted: true, delivered: false, verified: false },
+    appServerCleanupOutcome: verifiedAppCleanup,
+    cleanupFailure: "worker cleanup remains unverified",
+    createdAt: "2026-07-28T08:06:35.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const staleError = /** @type {Error & { appServerCleanupOutcome?: object }} */ (
+    new Error("worker observed an already-cleaned app-server root as absent")
+  );
+  staleError.appServerCleanupOutcome = {
+    attempted: false,
+    delivered: false,
+    verified: false,
+    degraded: true,
+    method: "identity-check"
+  };
+
+  await assert.rejects(
+    runTrackedJob(job, async () => {
+      throw staleError;
+    }),
+    staleError
+  );
+
+  const indexed = loadState(workspace).jobs.find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(workspace, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.cleanupOutcome.verified, false);
+    assert.equal(record.appServerCleanupOutcome.verified, true);
+  }
+});
+
+test("a late tracked-job success preserves cleanup evidence already persisted by cancel", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-late-success-after-cancel",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    pid: 47204,
+    processIdentity: "47204@worker",
+    createdAt: "2026-07-28T08:06:30.000Z"
+  };
+  const cleanupOutcome = {
+    attempted: true,
+    delivered: true,
+    verified: false,
+    survivors: [job.pid],
+    survivorIdentities: [job.processIdentity]
+  };
+
+  const execution = await runTrackedJob(job, async () => {
+    const pending = {
+      ...readStoredJob(workspace, job.id),
+      phase: "cleanup-pending",
+      cleanupOutcome,
+      cleanupFailure: "cancel could not verify worker cleanup"
+    };
+    writeJobFile(workspace, job.id, pending);
+    upsertJob(workspace, pending);
+    // Emulate a stale progress writer clobbering only the job file after the
+    // canonical cancel state was committed.
+    writeJobFile(workspace, job.id, {
+      ...pending,
+      phase: "running",
+      cleanupOutcome: null,
+      cleanupFailure: null
+    });
+    return {
+      exitStatus: 0,
+      payload: { ok: true },
+      rendered: "worker completed while cancel cleanup was pending",
+      summary: "completed"
+    };
+  });
+
+  assert.equal(execution.exitStatus, 0);
+  const stored = readStoredJob(workspace, job.id);
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.phase, "cleanup-pending");
+  assert.equal(stored.pid, process.pid);
+  assert.equal(stored.cleanupOutcome.verified, false);
+  assert.match(stored.cleanupFailure, /cancel could not verify/);
+  assert.equal(resolveCancelableJob(workspace, job.id).job.id, job.id);
+});
+
+test("a late tracked-job success cannot overwrite an authoritative cancellation", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-late-success-after-cancelled",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    createdAt: "2026-07-28T08:06:40.000Z"
+  };
+
+  await assert.rejects(
+    runTrackedJob(job, async () => {
+      const cancelled = {
+        ...readStoredJob(workspace, job.id),
+        status: "cancelled",
+        phase: "cancelled",
+        pid: null,
+        cleanupOutcome: { attempted: true, delivered: true, verified: true }
+      };
+      writeJobFile(workspace, job.id, cancelled);
+      upsertJob(workspace, cancelled);
+      return {
+        exitStatus: 0,
+        payload: { ok: true },
+        rendered: "late result",
+        summary: "late result"
+      };
+    }),
+    (error) => error?.code === "JOB_CANCELLED"
+  );
+
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+  assert.equal(loadState(workspace).jobs.find((candidate) => candidate.id === job.id)?.status, "cancelled");
+});
+
+test("tracked success observes cancellation committed at its terminal upsert", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-cancel-at-success-upsert",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    createdAt: "2026-07-28T08:06:50.000Z"
+  };
+  let cancellationInjected = false;
+
+  await assert.rejects(
+    runTrackedJob(
+      job,
+      async () => ({
+        exitStatus: 0,
+        payload: { ok: true },
+        rendered: "late success",
+        summary: "late success"
+      }),
+      {
+        upsertJobImpl(root, patch) {
+          if (!cancellationInjected && patch.status === "completed") {
+            cancellationInjected = true;
+            const cancelled = {
+              ...readStoredJob(root, job.id),
+              status: "cancelled",
+              phase: "cancelled",
+              pid: null,
+              cleanupOutcome: { attempted: true, delivered: true, verified: true }
+            };
+            // Match finishCancelledJob's ordering: locked index first, then
+            // the richer job file, immediately before the worker terminalizes.
+            upsertJob(root, cancelled);
+            writeJobFile(root, job.id, cancelled);
+          }
+          return upsertJob(root, patch);
+        }
+      }
+    ),
+    (error) => error?.code === "JOB_CANCELLED"
+  );
+
+  assert.equal(cancellationInjected, true);
+  assert.equal(loadState(workspace).jobs.find((candidate) => candidate.id === job.id)?.status, "cancelled");
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
+});
+
+test("tracked failure observes cancellation committed at its terminal upsert", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-cancel-at-failure-upsert",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    createdAt: "2026-07-28T08:06:55.000Z"
+  };
+  let cancellationInjected = false;
+
+  await assert.rejects(
+    runTrackedJob(
+      job,
+      async () => {
+        throw new Error("runner failed while cancellation landed");
+      },
+      {
+        upsertJobImpl(root, patch) {
+          if (!cancellationInjected && patch.status === "failed") {
+            cancellationInjected = true;
+            const cancelled = {
+              ...readStoredJob(root, job.id),
+              status: "cancelled",
+              phase: "cancelled",
+              pid: null,
+              cleanupOutcome: { attempted: true, delivered: true, verified: true }
+            };
+            upsertJob(root, cancelled);
+            writeJobFile(root, job.id, cancelled);
+          }
+          return upsertJob(root, patch);
+        }
+      }
+    ),
+    (error) => error?.code === "JOB_CANCELLED"
+  );
+
+  assert.equal(cancellationInjected, true);
+  assert.equal(loadState(workspace).jobs.find((candidate) => candidate.id === job.id)?.status, "cancelled");
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
 });
 
 test("cancel reclaims a helper spawned after worker identity capture without an ownership snapshot", async (t) => {
@@ -2323,14 +3978,13 @@ test("cancel with a job id can still target an active job from another Claude se
   assert.equal(state.jobs[0].status, "cancelled");
 });
 
-test("cancel sends turn interrupt to the shared app-server before killing a brokered task", async (t) => {
+test("cancel skips shared-broker interrupt for a persistent direct task", async (t) => {
   if (process.platform === "win32") {
     t.skip("Unix broker sockets are required for this contract.");
     return;
   }
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
   installFakeCodex(binDir, "interruptible-slow-task");
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -2338,14 +3992,35 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
   const env = withBrokerOwner(buildEnv(binDir), "cancel-interrupt");
+  const brokerSession = await ensureBrokerSession(repo, { env });
+  if (!brokerSession) {
+    t.skip("broker socket unavailable in this sandbox");
+    return;
+  }
+  let jobId = null;
+  t.after(() => {
+    if (jobId) {
+      run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+    }
+    run("node", [SESSION_HOOK, "SessionEnd"], {
+      cwd: repo,
+      env,
+      input: JSON.stringify({
+        hook_event_name: "SessionEnd",
+        session_id: env.CODEX_COMPANION_SESSION_ID,
+        cwd: repo
+      })
+    });
+  });
   const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
     cwd: repo,
     env
   });
 
+  if (launched.status === 0) {
+    jobId = JSON.parse(launched.stdout).jobId;
+  }
   assert.equal(launched.status, 0, launched.stderr);
-  const launchPayload = JSON.parse(launched.stdout);
-  const jobId = launchPayload.jobId;
   assert.ok(jobId);
 
   const stateDir = resolveStateDir(repo);
@@ -2366,19 +4041,10 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   assert.equal(cancelResult.status, 0, cancelResult.stderr);
   const cancelPayload = JSON.parse(cancelResult.stdout);
   assert.equal(cancelPayload.status, "cancelled");
-  assert.equal(cancelPayload.turnInterruptAttempted, true);
-  assert.equal(cancelPayload.turnInterrupted, true);
-
-  await waitFor(() => {
-    const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-    return fakeState.lastInterrupt ?? null;
-  });
-
-  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-  assert.deepEqual(fakeState.lastInterrupt, {
-    threadId: runningJob.threadId,
-    turnId: runningJob.turnId
-  });
+  assert.equal(cancelPayload.turnInterruptAttempted, false);
+  assert.equal(cancelPayload.turnInterrupted, false);
+  assert.equal(readStoredJob(repo, jobId).status, "cancelled");
+  assert.equal(loadBrokerSession(repo)?.pid, brokerSession.pid);
 
   const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
@@ -2389,6 +4055,244 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
     })
   });
   assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("cancel reclaims a persistent direct app-server helper after the worker crashes", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix process identities are required for detached helper recovery.");
+    return;
+  }
+
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "hanging-task-with-helper-child");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  let jobId = null;
+  const ownedProcesses = new Map();
+  t.after(() => {
+    if (jobId) {
+      run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+    }
+    if (fs.existsSync(fakeStatePath)) {
+      const state = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+      for (const pid of [...(state.appServerPids ?? []), ...(state.helperPids ?? [])]) {
+        if (!ownedProcesses.has(pid)) {
+          try {
+            const identity = getProcessIdentity(pid);
+            if (identity) {
+              ownedProcesses.set(pid, identity);
+            }
+          } catch {
+            // The process table may already be unavailable during cleanup.
+          }
+        }
+      }
+    }
+    for (const [pid, identity] of ownedProcesses) {
+      try {
+        if (hasLiveProcessIdentity(pid, identity)) {
+          process.kill(pid, "SIGKILL");
+        }
+      } catch {
+        // Ignore exact test-owned processes already reclaimed by cancellation.
+      }
+    }
+  });
+
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "wait for explicit cancellation"], {
+    cwd: repo,
+    env
+  });
+  if (launched.status === 0) {
+    jobId = JSON.parse(launched.stdout).jobId;
+  }
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.ok(jobId);
+
+  const durable = await waitFor(() => {
+    const indexed = loadState(repo).jobs.find((candidate) => candidate.id === jobId);
+    if (!indexed || !fs.existsSync(fakeStatePath)) {
+      return null;
+    }
+    const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+    const helperPid = fakeState.helperPids?.[0];
+    const appServerPid = fakeState.appServerPids?.[0];
+    const members = indexed.appServerOwnershipSnapshot?.members ?? [];
+    const helperMember = members.find((member) => member.pid === helperPid);
+    const appServerMember = members.find((member) => member.pid === appServerPid);
+    if (
+      indexed.status !== "running" ||
+      !Number.isFinite(indexed.pid) ||
+      !indexed.processIdentity ||
+      !Number.isFinite(indexed.appServerPid) ||
+      !indexed.appServerProcessIdentity ||
+      !helperMember?.identity ||
+      !appServerMember?.identity
+    ) {
+      return null;
+    }
+    return { indexed, helperMember, appServerMember };
+  }, { timeoutMs: 20000 });
+
+  for (const member of durable.indexed.appServerOwnershipSnapshot.members) {
+    ownedProcesses.set(member.pid, member.identity);
+  }
+  ownedProcesses.set(durable.indexed.pid, durable.indexed.processIdentity);
+  assert.equal(hasLiveProcessIdentity(durable.helperMember.pid, durable.helperMember.identity), true);
+
+  process.kill(durable.indexed.pid, "SIGKILL");
+  await waitFor(() => !hasLiveProcessIdentity(durable.indexed.pid, durable.indexed.processIdentity));
+  assert.equal(hasLiveProcessIdentity(durable.helperMember.pid, durable.helperMember.identity), true);
+
+  const cancel = run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+  assert.equal(cancel.status, 0, cancel.stderr);
+  assert.equal(JSON.parse(cancel.stdout).status, "cancelled");
+
+  await waitFor(() =>
+    durable.indexed.appServerOwnershipSnapshot.members.every(
+      (member) => !hasLiveProcessIdentity(member.pid, member.identity)
+    )
+  );
+  assert.equal(readStoredJob(repo, jobId).status, "cancelled");
+});
+
+test("cancel scans a crashed persistent app-server group for an uncaptured helper", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix process groups are required for post-snapshot helper recovery.");
+    return;
+  }
+
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "hanging-task-with-post-snapshot-helper");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  let jobId = null;
+  const ownedProcesses = new Map();
+  t.after(() => {
+    if (jobId) {
+      run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+    }
+    if (fs.existsSync(fakeStatePath)) {
+      const state = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+      for (const pid of [...(state.appServerPids ?? []), ...(state.helperPids ?? [])]) {
+        try {
+          const identity = ownedProcesses.get(pid) ?? getProcessIdentity(pid);
+          if (identity && hasLiveProcessIdentity(pid, identity)) {
+            process.kill(pid, "SIGKILL");
+          }
+        } catch {
+          // Ignore exact test-owned processes already reclaimed.
+        }
+      }
+    }
+  });
+
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "hold after spawning a helper"], {
+    cwd: repo,
+    env
+  });
+  if (launched.status === 0) {
+    jobId = JSON.parse(launched.stdout).jobId;
+  }
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.ok(jobId);
+
+  const durable = await waitFor(() => {
+    const indexed = loadState(repo).jobs.find((candidate) => candidate.id === jobId);
+    if (!indexed?.appServerOwnershipSnapshot || !fs.existsSync(fakeStatePath)) {
+      return null;
+    }
+    const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+    const helperPid = fakeState.helperPids?.[0];
+    const appServerPid = fakeState.appServerPids?.[0];
+    if (!Number.isFinite(helperPid) || !Number.isFinite(appServerPid)) {
+      return null;
+    }
+    const helperIdentity = getProcessIdentity(helperPid);
+    const appServerIdentity = getProcessIdentity(appServerPid);
+    if (!helperIdentity || !appServerIdentity || !indexed.processIdentity) {
+      return null;
+    }
+    return { indexed, helperPid, helperIdentity, appServerPid, appServerIdentity };
+  }, { timeoutMs: 20000 });
+
+  ownedProcesses.set(durable.helperPid, durable.helperIdentity);
+  ownedProcesses.set(durable.appServerPid, durable.appServerIdentity);
+  assert.equal(
+    durable.indexed.appServerOwnershipSnapshot.members.some((member) => member.pid === durable.helperPid),
+    false
+  );
+
+  process.kill(durable.indexed.pid, "SIGKILL");
+  await waitFor(() => !hasLiveProcessIdentity(durable.indexed.pid, durable.indexed.processIdentity));
+  await waitFor(() => !hasLiveProcessIdentity(durable.indexed.appServerPid, durable.indexed.appServerProcessIdentity));
+  await waitFor(() => !hasLiveProcessIdentity(durable.appServerPid, durable.appServerIdentity));
+  assert.equal(hasLiveProcessIdentity(durable.helperPid, durable.helperIdentity), true);
+
+  const cancel = run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: repo, env });
+  assert.equal(cancel.status, 0, cancel.stderr);
+  assert.equal(JSON.parse(cancel.stdout).status, "cancelled");
+  await waitFor(() => !hasLiveProcessIdentity(durable.helperPid, durable.helperIdentity));
+  assert.equal(readStoredJob(repo, jobId).status, "cancelled");
+});
+
+test("cancel retains graceful turn interrupt for a session-scoped shared job", async () => {
+  const workspace = makeTempDir();
+  const job = {
+    id: "task-session-scoped-interrupt",
+    workspaceRoot: workspace,
+    kind: "task",
+    title: "Codex Task",
+    jobClass: "task",
+    status: "running",
+    phase: "running",
+    pid: 43210,
+    processIdentity: "43210@Mon Jul 28 08:10:00 2026",
+    threadId: "thr-session-scoped",
+    turnId: "turn-session-scoped",
+    createdAt: "2026-07-28T08:10:00.000Z"
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  let interrupted = null;
+  await handleCancel([job.id, "--cwd", workspace, "--json"], {
+    async interruptAppServerTurnImpl(cwd, identifiers) {
+      interrupted = { cwd, identifiers };
+      return { attempted: true, interrupted: true };
+    },
+    async terminateProcessTreeImpl() {
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    }
+  });
+
+  assert.deepEqual(interrupted, {
+    cwd: workspace,
+    identifiers: {
+      threadId: job.threadId,
+      turnId: job.turnId
+    }
+  });
+  assert.equal(readStoredJob(workspace, job.id).status, "cancelled");
 });
 
 test("session end fully cleans up jobs for the ending session", async (t) => {

@@ -23,7 +23,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
+import { hasCancelFlag, loadState, readJobFile, resolveJobFile, resolveStateFile, updateState, writeCancelFlag, writeJobFile } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { runRegisteredBrokerReaper } from "./registered-broker-reaper.mjs";
@@ -61,21 +61,29 @@ export async function cleanupSessionJobs(cwd, sessionId, dependencies = {}) {
   }
 
   const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  const removedJobs = state.jobs.filter(
+    (job) => job.sessionId === sessionId && job.sessionLifetime !== "persistent"
+  );
   if (removedJobs.length === 0) {
     return { verified: true, failures: [] };
   }
 
   const terminate = dependencies.terminateProcessTreeImpl ?? terminateProcessTree;
+  const writeCancel = dependencies.writeCancelFlagImpl ?? writeCancelFlag;
   const retainedJobs = [];
   const failures = [];
   for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
+    const cleanupUnresolved =
+      job.phase === "cleanup-pending" ||
+      (typeof job.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+      job.cleanupOutcome?.verified === false ||
+      job.appServerCleanupOutcome?.verified === false;
+    const requiresCleanup = job.status === "queued" || job.status === "running" || cleanupUnresolved;
+    if (!requiresCleanup) {
       continue;
     }
-    if (job.status === "queued" && !Number.isFinite(job.pid)) {
-      writeCancelFlag(workspaceRoot, job.id);
+    if (job.status === "queued" && !Number.isFinite(job.pid) && !cleanupUnresolved) {
+      writeCancel(workspaceRoot, job.id);
       retainedJobs.push(job);
       continue;
     }
@@ -96,19 +104,20 @@ export async function cleanupSessionJobs(cwd, sessionId, dependencies = {}) {
           ? `Job ${job.id} could not be verified as owned and was left alone.`
           : "Session cleanup could not verify process termination.";
       const retainedJob = {
-        ...job,
+        id: job.id,
+        pid: job.pid,
         phase: "cleanup-pending",
         cleanupOutcome: outcome,
         cleanupFailure
       };
-      writeJobFile(workspaceRoot, job.id, retainedJob);
       retainedJobs.push(retainedJob);
     } catch (error) {
       if (error?.code === "ESRCH") {
         continue;
       }
       const retainedJob = {
-        ...job,
+        id: job.id,
+        pid: job.pid,
         phase: "cleanup-pending",
         cleanupOutcome: {
           attempted: true,
@@ -120,20 +129,105 @@ export async function cleanupSessionJobs(cwd, sessionId, dependencies = {}) {
         },
         cleanupFailure: error instanceof Error ? error.message : String(error)
       };
-      writeJobFile(workspaceRoot, job.id, retainedJob);
       retainedJobs.push(retainedJob);
       failures.push(error);
     }
   }
 
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs.filter((job) => job.sessionId !== sessionId).concat(retainedJobs)
+  const removedIds = new Set(removedJobs.map((job) => job.id));
+  const removedById = new Map(removedJobs.map((job) => [job.id, job]));
+  const retainedById = new Map(retainedJobs.map((job) => [job.id, job]));
+  const resolvedDuringMerge = new Set();
+  updateState(workspaceRoot, (currentState) => {
+    const presentIds = new Set(currentState.jobs.map((job) => job.id));
+    currentState.jobs = currentState.jobs.flatMap((currentJob) => {
+      if (
+        !removedIds.has(currentJob.id) ||
+        currentJob.sessionId !== sessionId ||
+        currentJob.sessionLifetime === "persistent"
+      ) {
+        return [currentJob];
+      }
+
+      const retained = retainedById.get(currentJob.id);
+      if (!retained) {
+        resolvedDuringMerge.add(currentJob.id);
+        return [];
+      }
+
+      // A queued worker may publish its pid while cleanup is awaiting another
+      // process. Preserve that fresh record; its cancel flag makes the worker
+      // converge to cancelled. For an unverified termination, merge only the
+      // cleanup fields onto the fresh record and keep its ownership proof.
+      if (retained.cleanupOutcome) {
+        // A worker may reach a terminal status while process teardown awaits,
+        // but terminal bookkeeping is not proof that every owned descendant
+        // died. Preserve that fresh status plus the unverified cleanup record
+        // so a later cancel can retry from the surviving ownership evidence.
+        const merged = {
+          ...currentJob,
+          phase: retained.phase,
+          pid: Number.isFinite(currentJob.pid) ? currentJob.pid : retained.pid,
+          cleanupOutcome: retained.cleanupOutcome,
+          cleanupFailure: retained.cleanupFailure
+        };
+        writeJobFile(workspaceRoot, currentJob.id, merged);
+        return [merged];
+      }
+      if (currentJob.status !== "queued" && currentJob.status !== "running") {
+        resolvedDuringMerge.add(currentJob.id);
+        return [];
+      }
+      return [currentJob];
+    });
+
+    // Another cleanup can finish while this invocation is awaiting process
+    // teardown. Absence from both the fresh index and durable artifacts means
+    // that cleanup resolved the job. A remaining job file or cancel tombstone
+    // is the opposite: reconstruct the retry record so a stale writer or
+    // explicit removal cannot strand ownership proof outside the index.
+    for (const retained of retainedJobs) {
+      if (presentIds.has(retained.id)) {
+        continue;
+      }
+      const jobFile = resolveJobFile(workspaceRoot, retained.id);
+      const cancelPending = hasCancelFlag(workspaceRoot, retained.id);
+      if (!fs.existsSync(jobFile) && !cancelPending) {
+        resolvedDuringMerge.add(retained.id);
+        continue;
+      }
+
+      let storedJob = null;
+      try {
+        storedJob = fs.existsSync(jobFile) ? readJobFile(jobFile) : null;
+      } catch {
+        // The original indexed record below is sufficient to restore the
+        // retry contract; overwrite an unreadable per-job file with it.
+      }
+      const baseJob = storedJob?.id === retained.id ? storedJob : removedById.get(retained.id);
+      if (!baseJob) {
+        continue;
+      }
+      const restored = retained.cleanupOutcome
+        ? {
+            ...baseJob,
+            phase: retained.phase,
+            pid: Number.isFinite(baseJob.pid) ? baseJob.pid : retained.pid,
+            cleanupOutcome: retained.cleanupOutcome,
+            cleanupFailure: retained.cleanupFailure
+          }
+        : baseJob;
+      writeJobFile(workspaceRoot, retained.id, restored);
+      currentState.jobs.push(restored);
+    }
   });
   if (failures.length > 0) {
     throw failures[0];
   }
-  return { verified: retainedJobs.length === 0, failures: [] };
+  const unresolvedIds = retainedJobs.filter(
+    (job) => !resolvedDuringMerge.has(job.id) && (job.cleanupOutcome || hasCancelFlag(workspaceRoot, job.id))
+  );
+  return { verified: unresolvedIds.length === 0, failures: [] };
 }
 
 export async function handleSessionStart(input, dependencies = {}) {
