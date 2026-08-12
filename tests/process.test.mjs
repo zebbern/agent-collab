@@ -6,9 +6,25 @@ import {
   captureStableSessionOwner,
   getLiveProcessPids,
   hasLiveProcessIdentity,
+  runCommand,
+  runCommandChecked,
   terminateProcessGroup,
   terminateProcessTree
 } from "../plugins/codex/scripts/lib/process.mjs";
+
+test("runCommand preserves signal termination as a failed command", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix signals are required for this contract.");
+    return;
+  }
+
+  const args = ["-e", "process.kill(process.pid, 'SIGTERM')"];
+  const result = runCommand(process.execPath, args);
+
+  assert.equal(result.status, null);
+  assert.equal(result.signal, "SIGTERM");
+  assert.throws(() => runCommandChecked(process.execPath, args), /signal=SIGTERM/);
+});
 
 test("Unix process-table reads pin LC_ALL=C so lstart identities are locale-stable", () => {
   // The lstart text IS the identity payload compared across invocations; a

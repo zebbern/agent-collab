@@ -14,14 +14,15 @@ the full two-platform picture to exist before a merge was proposed.
 
 ## Decision
 
-`npm run verify` (`scripts/verify.mjs`) is the pre-merge gate, with three
-legs: the build (app-server types + tsc checkJs), the native suite on the
-host platform, and the full suite inside docker `node:22` — the same image
-that reproduces ubuntu CI behavior exactly. The two suite legs together cover
-more than either platform alone.
+`npm run verify` (`scripts/verify.mjs`) is the pre-merge gate. It starts with
+a version-metadata coherence check, then runs three execution legs: the build
+(app-server types + tsc checkJs), the native suite on the host platform, and
+the full suite inside docker `node:22` — the same image that reproduces ubuntu
+CI behavior exactly. The two suite legs together cover more than either
+platform alone.
 
 Reporting rule: a skipped leg is never reported as a pass. If the Linux leg
-cannot run (`--no-linux`, or docker unavailable), the summary says UNVERIFIED
+cannot run (`npm run verify:no-linux`, or docker unavailable), the summary says UNVERIFIED
 and the gate is INCOMPLETE — the same "unknown is not healthy" doctrine the
 runtime code follows. A leg killed by a signal is reported as an error, not
 conflated with a test failure.
@@ -57,10 +58,17 @@ gate structurally cannot see.
 
 ## Consequences
 
-- Merges are gated locally before anything is pushed; PR CI (ubuntu +
-  windows) remains the required remote check when it dispatches, and it is
-  the authority on anything checkout-shaped.
-- Skipping the docker leg is possible but loud: the exit is 0, the verdict is
-  INCOMPLETE, and the leg reads UNVERIFIED.
+- Merges are gated locally before anything is pushed. PR CI remains the
+  authority on anything checkout-shaped; its stable `Required CI` aggregate
+  succeeds only after every required ubuntu + windows matrix leg and the
+  supported Node 20 floor pass, and
+  is the sole context branch protection should require. Local and CI builds
+  use the exact Codex CLI devDependency recorded in the npm lockfile; a
+  scheduled, advisory, build-only canary checks the latest CLI against the
+  generated app-server type boundary before that version is promoted into the
+  release gate.
+- Skipping the docker leg is possible but loud: the exit is 2, the verdict is
+  INCOMPLETE, and the leg reads UNVERIFIED. Automation cannot mistake a
+  deliberately incomplete run for a pass.
 - "Gate: PASSED" means every leg actually ran and passed — over one set of
   bytes, on one checkout.

@@ -16,14 +16,42 @@ import { spawn } from "node:child_process";
 
 import { buildCursorEnv, installFakeCursorAgent } from "./fake-cursor-agent-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
-import { readStartupMetrics, resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
-import { createProgressReporter } from "../plugins/cursor/scripts/lib/tracked-jobs.mjs";
+import { handleCancel, persistWslAgentIdentity } from "../plugins/cursor/scripts/cursor-companion.mjs";
+import { readStoredJob, resolveCancelableJob, resolveResultJob } from "../plugins/cursor/scripts/lib/job-control.mjs";
+import { listJobs, readStartupMetrics, resolveStateDir, upsertJob, writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs";
+import { createProgressReporter, runTrackedJob } from "../plugins/cursor/scripts/lib/tracked-jobs.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs");
 
 // Isolate cursor-companion state from any real plugin data dir on this host.
 process.env.CURSOR_COMPANION_STATE_ROOT = makeTempDir("cursor-plugin-runtime-state-");
+
+test("status --wait treats unresolved cleanup as active after a terminal write", () => {
+  const repo = makeTempDir("cursor-cleanup-wait-");
+  const job = {
+    id: "task-cursor-cleanup-wait",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "failed",
+    phase: "failed",
+    cleanupOutcome: { verified: false },
+    cleanupFailure: "owned process cleanup remains unverified",
+    createdAt: "2026-08-12T10:00:00.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  const result = run("node", [SCRIPT, "status", job.id, "--wait", "--timeout-ms", "25", "--json"], {
+    cwd: repo,
+    env: process.env
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).waitTimedOut, true);
+});
 
 function makeTaskRepo() {
   const repo = makeTempDir("cursor-plugin-test-");
@@ -97,6 +125,27 @@ test("setup reports ready with the native transport when the fake cursor-agent i
   assert.equal(payload.auth.loggedIn, true);
   assert.match(payload.auth.detail, /Logged in as fake@example\.com/);
   assert.equal(payload.platform, process.platform);
+});
+
+test("setup rejects a Cursor version probe terminated by a signal", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Unix signal termination semantics are required for this contract.");
+    return;
+  }
+
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "signal-on-version");
+
+  const result = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: ROOT,
+    env: withTestBinaryOverride(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.cursor.available, false);
+  assert.equal(payload.auth.loggedIn, false);
+  assert.equal(payload.ready, false);
 });
 
 test("setup reports the login step when cursor-agent says it is not logged in", () => {
@@ -180,6 +229,43 @@ test("task stores the init-resolved session id, model, and native transport", ()
   assert.equal(args.includes("--model"), false);
   const workspaceArg = args[args.indexOf("--workspace") + 1];
   assert.equal(fs.realpathSync.native(workspaceArg), fs.realpathSync.native(repo));
+});
+
+test("normal Cursor completion with historical WSL ownership is terminal", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-normal-wsl-completion",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "queued",
+    phase: "queued",
+    pid: null,
+    wslAgentPid: 47001,
+    wslAgentStartTime: "987654320",
+    transport: "wsl",
+    createdAt: "2026-07-28T08:00:00.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  await runTrackedJob(job, async () => ({
+    exitStatus: 0,
+    threadId: "sess-wsl-complete",
+    payload: { ok: true },
+    rendered: "done",
+    summary: "done"
+  }));
+
+  const indexed = listJobs(repo).find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(repo, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "completed");
+    assert.equal(record.phase, "done");
+    assert.equal(record.wslAgentPid, job.wslAgentPid);
+  }
+  assert.equal(resolveResultJob(repo, job.id).job.id, job.id);
 });
 
 test("task --model passes --model through to cursor-agent", () => {
@@ -711,13 +797,17 @@ test("task --background enqueues a detached worker and result returns its output
   const repo = makeTaskRepo();
   const binDir = makeTempDir();
   installFakeCursorAgent(binDir);
+  const launchEnv = {
+    ...buildCursorEnv(binDir),
+    CURSOR_COMPANION_SESSION_ID: "cursor-background-launch"
+  };
 
   const launched = run(
     "node",
     [SCRIPT, "task", "--background", "--profile", "fast", "--json", "investigate in the background"],
     {
       cwd: repo,
-      env: buildCursorEnv(binDir)
+      env: launchEnv
     }
   );
 
@@ -726,12 +816,17 @@ test("task --background enqueues a detached worker and result returns its output
   assert.equal(launchPayload.status, "queued");
   assert.match(launchPayload.jobId, /^task-/);
 
+  const nextSessionEnv = {
+    ...launchEnv,
+    CURSOR_COMPANION_SESSION_ID: "cursor-background-next"
+  };
+
   const waitedStatus = run(
     "node",
     [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "60000", "--json"],
     {
       cwd: repo,
-      env: buildCursorEnv(binDir)
+      env: nextSessionEnv
     }
   );
 
@@ -742,9 +837,16 @@ test("task --background enqueues a detached worker and result returns its output
   // self-documents instead of printing only 'failed' !== 'completed'.
   assert.equal(waitedPayload.job.status, "completed", JSON.stringify(waitedPayload.job));
 
-  const result = run("node", [SCRIPT, "result", launchPayload.jobId, "--json"], {
+  const status = run("node", [SCRIPT, "status", "--json"], {
     cwd: repo,
-    env: buildCursorEnv(binDir)
+    env: nextSessionEnv
+  });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).latestFinished?.id, launchPayload.jobId);
+
+  const result = run("node", [SCRIPT, "result", "--json"], {
+    cwd: repo,
+    env: nextSessionEnv
   });
   assert.equal(result.status, 0, result.stderr);
   const resultPayload = JSON.parse(result.stdout);
@@ -803,6 +905,490 @@ test("cancel refuses to kill a pid it cannot prove ownership of", async (t) => {
   const staleJob = state.jobs.find((job) => job.id === "task-stale");
   assert.notEqual(staleJob.status, "cancelled");
   assert.equal(staleJob.phase, "cleanup-pending");
+});
+
+test("a successful Cursor cleanup retry derives the Windows worker pid from exact identity", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-cleanup-retry",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "running",
+    phase: "running",
+    pid: 46001,
+    processIdentity: "46001@win32:123456789",
+    ownershipSnapshot: null,
+    createdAt: "2026-07-28T08:06:00.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", repo, "--json"], {
+      async terminateProcessTreeImpl() {
+        return {
+          attempted: true,
+          delivered: true,
+          verified: false,
+          degraded: true,
+          survivors: [job.pid],
+          survivorIdentities: [job.processIdentity]
+        };
+      },
+      probeWindowsProcessIdentityImpl() {
+        return { status: "unavailable", identity: null };
+      },
+      workerExitWaitMs: 0
+    }),
+    /ownership records were preserved for retry/
+  );
+
+  const pending = readStoredJob(repo, job.id);
+  const lateFailure = {
+    ...pending,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage: "late worker failure"
+  };
+  writeJobFile(repo, job.id, lateFailure);
+  upsertJob(repo, lateFailure);
+
+  const retryPids = [];
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async terminateProcessTreeImpl(pid) {
+      retryPids.push(pid);
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    },
+    probeWindowsProcessIdentityImpl(pid) {
+      retryPids.push(pid);
+      return { status: "absent", identity: null };
+    },
+    workerExitWaitMs: 0
+  });
+
+  const retried = readStoredJob(repo, job.id);
+  assert.equal(retried.status, "cancelled");
+  assert.equal(retried.cleanupOutcome.verified, true);
+  assert.equal(retried.cleanupFailure, null);
+  assert.ok(retryPids.length >= 1);
+  assert.deepEqual(new Set(retryPids), new Set([job.pid]));
+  assert.throws(() => resolveCancelableJob(repo, job.id), /already cancelled/);
+  assert.equal(resolveResultJob(repo, job.id).job.id, job.id);
+});
+
+test("concurrent Cursor cancels keep verified worker cleanup monotonic", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-concurrent-cancel",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 46002,
+    processIdentity: "46002@worker",
+    ownershipSnapshot: {
+      rootPid: 46002,
+      rootIdentity: "46002@worker",
+      members: [{ pid: 46002, identity: "46002@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:06:05.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  /** @type {() => void} */
+  let markSlowStarted = () => {};
+  const slowStarted = new Promise((resolve) => {
+    markSlowStarted = resolve;
+  });
+  /** @type {(outcome: object) => void} */
+  let releaseSlow = () => {};
+  const slowOutcome = new Promise((resolve) => {
+    releaseSlow = resolve;
+  });
+  const verified = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+
+  const slowCancel = handleCancel([job.id, "--cwd", repo, "--json"], {
+    async terminateProcessTreeImpl() {
+      markSlowStarted();
+      return slowOutcome;
+    }
+  });
+  await slowStarted;
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async terminateProcessTreeImpl() {
+      return verified;
+    }
+  });
+  releaseSlow({
+    attempted: true,
+    delivered: false,
+    verified: false,
+    degraded: true,
+    survivors: [job.pid],
+    survivorIdentities: [job.processIdentity]
+  });
+  await slowCancel;
+
+  const indexed = listJobs(repo).find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(repo, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cancelled");
+    assert.equal(record.cleanupFailure, null);
+    assert.equal(record.cleanupOutcome.verified, true);
+  }
+});
+
+test("Cursor cancel reaps WSL ownership published during worker teardown", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-late-wsl-owner",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 46003,
+    processIdentity: "46003@worker",
+    ownershipSnapshot: {
+      rootPid: 46003,
+      rootIdentity: "46003@worker",
+      members: [{ pid: 46003, identity: "46003@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:06:07.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  const verified = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+  let published = false;
+  let workerCleanupCalls = 0;
+  const wslReapPids = [];
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async reapWslAgentImpl(pid) {
+      wslReapPids.push(pid);
+      return { reaped: true, signal: "TERM" };
+    },
+    async terminateProcessTreeImpl() {
+      workerCleanupCalls += 1;
+      if (!published) {
+        published = true;
+        persistWslAgentIdentity(repo, job.id)(46004, "987654324");
+      }
+      return verified;
+    }
+  });
+
+  assert.deepEqual(wslReapPids, [46004]);
+  assert.equal(workerCleanupCalls, 2);
+  const indexed = listJobs(repo).find((candidate) => candidate.id === job.id);
+  const stored = readStoredJob(repo, job.id);
+  for (const record of [indexed, stored]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cancelled");
+    assert.equal(record.wslAgentPid, 46004);
+    assert.equal(record.wslReap.reaped, true);
+    assert.equal(record.cleanupOutcome.verified, true);
+  }
+});
+
+test("first WSL ownership published after cancellation reopens both stores", () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-post-cancel-wsl-owner",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    processIdentity: "46005@worker",
+    cleanupOutcome: { attempted: true, delivered: true, verified: true },
+    cleanupFailure: null,
+    createdAt: "2026-07-28T08:06:07.500Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  persistWslAgentIdentity(repo, job.id)(46006, "987654326");
+
+  for (const record of [
+    listJobs(repo).find((candidate) => candidate.id === job.id),
+    readStoredJob(repo, job.id)
+  ]) {
+    assert.equal(record.status, "cancelled");
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.wslAgentPid, 46006);
+    assert.equal(record.wslReap, null);
+  }
+  assert.equal(resolveCancelableJob(repo, job.id).job.id, job.id);
+});
+
+test("Cursor cancel stays retryable when late WSL ownership cannot be reaped", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-late-wsl-unverified",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    sessionLifetime: "persistent",
+    status: "running",
+    phase: "running",
+    pid: 46013,
+    processIdentity: "46013@worker",
+    ownershipSnapshot: {
+      rootPid: 46013,
+      rootIdentity: "46013@worker",
+      members: [{ pid: 46013, identity: "46013@worker", depth: 0 }]
+    },
+    createdAt: "2026-07-28T08:06:08.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  let published = false;
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", repo, "--json"], {
+      async reapWslAgentImpl(pid) {
+        return { reaped: false, survivors: [pid] };
+      },
+      async terminateProcessTreeImpl() {
+        if (!published) {
+          published = true;
+          persistWslAgentIdentity(repo, job.id)(46014, "987654325");
+        }
+        return {
+          attempted: true,
+          delivered: true,
+          verified: true,
+          degraded: false,
+          survivors: [],
+          survivorIdentities: []
+        };
+      }
+    }),
+    /not marking cancelled/
+  );
+
+  for (const record of [
+    listJobs(repo).find((candidate) => candidate.id === job.id),
+    readStoredJob(repo, job.id)
+  ]) {
+    assert.equal(record.status, "running");
+    assert.equal(record.phase, "cleanup-pending");
+    assert.equal(record.wslAgentPid, 46014);
+    assert.equal(record.wslReap.reaped, false);
+  }
+});
+
+test("Cursor cleanup retry persists a verified WSL reap and retries only the worker root", async () => {
+  const repo = makeTaskRepo();
+  const job = {
+    id: "task-cursor-wsl-reap-retry",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "running",
+    phase: "running",
+    pid: 46101,
+    processIdentity: "46101@win32:123456790",
+    ownershipSnapshot: null,
+    wslAgentPid: 47101,
+    wslAgentStartTime: "987654321",
+    createdAt: "2026-07-28T08:06:10.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  const verifiedWslReap = { reaped: true, signal: "TERM" };
+  let wslReapCalls = 0;
+  let workerCleanupCalls = 0;
+  await assert.rejects(
+    handleCancel([job.id, "--cwd", repo, "--json"], {
+      async reapWslAgentImpl(pid, options) {
+        wslReapCalls += 1;
+        assert.equal(pid, job.wslAgentPid);
+        assert.equal(options.expectedStartTime, job.wslAgentStartTime);
+        return verifiedWslReap;
+      },
+      async terminateProcessTreeImpl(pid) {
+        workerCleanupCalls += 1;
+        assert.equal(pid, job.pid);
+        return {
+          attempted: true,
+          delivered: true,
+          verified: false,
+          degraded: true,
+          survivors: [job.pid],
+          survivorIdentities: [job.processIdentity]
+        };
+      },
+      probeWindowsProcessIdentityImpl() {
+        return { status: "unavailable", identity: null };
+      },
+      workerExitWaitMs: 0
+    }),
+    /ownership records were preserved for retry/
+  );
+
+  assert.deepEqual(readStoredJob(repo, job.id).wslReap, verifiedWslReap);
+  assert.deepEqual(
+    listJobs(repo).find((candidate) => candidate.id === job.id)?.wslReap,
+    verifiedWslReap
+  );
+
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async reapWslAgentImpl() {
+      assert.fail("a verified WSL reap must not be repeated");
+    },
+    async terminateProcessTreeImpl(pid) {
+      workerCleanupCalls += 1;
+      assert.equal(pid, job.pid);
+      return {
+        attempted: true,
+        delivered: true,
+        verified: true,
+        degraded: false,
+        survivors: [],
+        survivorIdentities: []
+      };
+    }
+  });
+
+  const cancelled = readStoredJob(repo, job.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.deepEqual(cancelled.wslReap, verifiedWslReap);
+  assert.equal(cancelled.cleanupOutcome.verified, true);
+  assert.equal(wslReapCalls, 1);
+  assert.equal(workerCleanupCalls, 2);
+});
+
+test("Cursor cleanup retry skips an already verified worker root", async () => {
+  const repo = makeTaskRepo();
+  const verifiedWorkerCleanup = {
+    attempted: true,
+    delivered: true,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  };
+  const job = {
+    id: "task-cursor-worker-clean-retry",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "running",
+    phase: "cleanup-pending",
+    pid: 46102,
+    processIdentity: "46102@win32:123456791",
+    ownershipSnapshot: null,
+    cleanupOutcome: verifiedWorkerCleanup,
+    wslAgentPid: 47102,
+    wslAgentStartTime: "987654322",
+    wslReap: { reaped: false, survivors: [47102] },
+    cleanupFailure: "WSL cleanup remains unverified",
+    createdAt: "2026-07-28T08:06:20.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  let workerCleanupCalls = 0;
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async reapWslAgentImpl(pid, options) {
+      assert.equal(pid, job.wslAgentPid);
+      assert.equal(options.expectedStartTime, job.wslAgentStartTime);
+      return { reaped: true, signal: "KILL" };
+    },
+    async terminateProcessTreeImpl() {
+      workerCleanupCalls += 1;
+      assert.fail("an already verified worker root must not be terminated again");
+    }
+  });
+
+  const cancelled = readStoredJob(repo, job.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.wslReap.reaped, true);
+  assert.deepEqual(cancelled.cleanupOutcome, verifiedWorkerCleanup);
+  assert.equal(workerCleanupCalls, 0);
+});
+
+test("Cursor cleanup finalizes an already verified WSL-only root without worker cleanup", async () => {
+  const repo = makeTaskRepo();
+  const verifiedWslReap = { reaped: true, signal: "TERM" };
+  const job = {
+    id: "task-cursor-wsl-only-clean",
+    workspaceRoot: repo,
+    kind: "task",
+    title: "Cursor Task",
+    jobClass: "task",
+    status: "running",
+    phase: "cleanup-pending",
+    pid: null,
+    wslAgentPid: 47103,
+    wslAgentStartTime: "987654323",
+    wslReap: verifiedWslReap,
+    cleanupFailure: "worker ownership was never published",
+    createdAt: "2026-07-28T08:06:30.000Z"
+  };
+  writeJobFile(repo, job.id, job);
+  upsertJob(repo, job);
+
+  await handleCancel([job.id, "--cwd", repo, "--json"], {
+    async reapWslAgentImpl() {
+      assert.fail("a verified WSL root must not be reaped again");
+    },
+    async terminateProcessTreeImpl() {
+      assert.fail("an absent worker root must not invoke process cleanup");
+    }
+  });
+
+  const cancelled = readStoredJob(repo, job.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.deepEqual(cancelled.wslReap, verifiedWslReap);
+  assert.deepEqual(cancelled.cleanupOutcome, {
+    attempted: false,
+    delivered: false,
+    verified: true,
+    degraded: false,
+    survivors: [],
+    survivorIdentities: []
+  });
 });
 
 test("cancel stops an in-process review and survives a clobbered job file", async (t) => {
@@ -889,10 +1475,14 @@ test("cancel stops a slow background task and marks it cancelled", async () => {
   const repo = makeTaskRepo();
   const binDir = makeTempDir();
   installFakeCursorAgent(binDir, "slow");
+  const launchEnv = {
+    ...buildCursorEnv(binDir),
+    CURSOR_COMPANION_SESSION_ID: "cursor-cancel-launch"
+  };
 
   const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the slow path"], {
     cwd: repo,
-    env: buildCursorEnv(binDir)
+    env: launchEnv
   });
 
   assert.equal(launched.status, 0, launched.stderr);
@@ -912,9 +1502,12 @@ test("cancel stops a slow background task and marks it cancelled", async () => {
   }, { timeoutMs: 60000 });
   assert.equal(runningJob.threadId, "sess-fake-1");
 
-  const cancelResult = run("node", [SCRIPT, "cancel", jobId, "--json"], {
+  const cancelResult = run("node", [SCRIPT, "cancel", "--json"], {
     cwd: repo,
-    env: buildCursorEnv(binDir)
+    env: {
+      ...launchEnv,
+      CURSOR_COMPANION_SESSION_ID: "cursor-cancel-next"
+    }
   });
 
   assert.equal(cancelResult.status, 0, cancelResult.stderr);

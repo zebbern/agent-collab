@@ -279,7 +279,7 @@ if (args[0] !== "app-server") {
 }
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
-if (BEHAVIOR === "with-helper-child" || BEHAVIOR === "slow-task-with-helper-child" || BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "with-resistant-helper" || BEHAVIOR === "crash-with-post-snapshot-helper") {
+if (BEHAVIOR === "with-helper-child" || BEHAVIOR === "slow-task-with-helper-child" || BEHAVIOR === "hanging-task-with-helper-child" || BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "with-resistant-helper" || BEHAVIOR === "crash-with-post-snapshot-helper") {
   if (BEHAVIOR !== "crash-with-post-snapshot-helper") {
     const helperCode = BEHAVIOR === "with-resistant-helper"
       ? "process.on('SIGTERM', () => {}); " + SELF_EXPIRING_KEEPALIVE
@@ -292,7 +292,7 @@ if (BEHAVIOR === "with-helper-child" || BEHAVIOR === "slow-task-with-helper-chil
     bootState.helperPids = [...(bootState.helperPids || []), helper.pid];
   }
 }
-if (BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "crash-with-post-snapshot-helper" || BEHAVIOR === "crash-with-post-activation-regrouped-helper" || BEHAVIOR === "post-activation-helper-on-thread-list" || BEHAVIOR === "streaming-helper-after-response") {
+if (BEHAVIOR === "hanging-task-with-helper-child" || BEHAVIOR === "hanging-task-with-post-snapshot-helper" || BEHAVIOR === "crash-with-regrouped-helper" || BEHAVIOR === "crash-with-post-snapshot-helper" || BEHAVIOR === "crash-with-post-activation-regrouped-helper" || BEHAVIOR === "post-activation-helper-on-thread-list" || BEHAVIOR === "streaming-helper-after-response") {
   bootState.appServerPids = [...(bootState.appServerPids || []), process.pid];
 }
 saveState(bootState);
@@ -685,7 +685,21 @@ rl.on("line", (line) => {
           }
         ];
 
-	        if (BEHAVIOR === "interruptible-slow-task") {
+	        if (BEHAVIOR === "hanging-task-with-post-snapshot-helper") {
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          setTimeout(() => {
+	            const helper = spawn(process.execPath, ["-e", SELF_EXPIRING_KEEPALIVE], {
+	              detached: false,
+	              stdio: "ignore"
+	            });
+	            helper.unref();
+	            const current = loadState();
+	            current.helperPids = [...(current.helperPids || []), helper.pid];
+	            saveState(current);
+	          }, 150);
+	        } else if (BEHAVIOR === "hanging-task-with-helper-child") {
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	        } else if (BEHAVIOR === "interruptible-slow-task") {
 	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
 	          const timer = setTimeout(() => {
 	            if (!interruptibleTurns.has(turnId)) {

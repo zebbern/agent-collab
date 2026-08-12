@@ -27,6 +27,17 @@ import {
 const APPLY_MODE = "apply-registered";
 const REPORT_MODE = "report-only";
 
+/**
+ * @typedef {{
+ *   registered: true,
+ *   version: number,
+ *   brokerKey: string,
+ *   registryRoot: string,
+ *   registryDir: string,
+ *   broker: any
+ * }} RegisteredBrokerRegistration
+ */
+
 // Mirrors broker-ownership.mjs: POSIX mode bits are unrepresentable on Windows
 // (modes read back 0o666), so exact-mode checks apply only off win32.
 const ENFORCE_POSIX_MODES = process.platform !== "win32";
@@ -61,13 +72,14 @@ function listRegistrationCandidates(env) {
         throw new Error("broker record is not a private regular file");
       }
       const broker = JSON.parse(fs.readFileSync(brokerPath, "utf8"));
-      const registration = loadBrokerRegistration({
+      const loadedRegistration = loadBrokerRegistration({
         endpoint: broker?.endpoint,
         brokerIdentity: broker?.pidIdentity,
         env
       });
+      const registration = /** @type {RegisteredBrokerRegistration} */ (loadedRegistration);
       if (
-        registration.registered !== true ||
+        loadedRegistration.registered !== true ||
         registration.brokerKey !== entry.name ||
         registration.registryDir !== registryDir
       ) {
@@ -163,13 +175,14 @@ async function processRegistration(candidate, options) {
   let residualIdentities = [];
   let result;
   try {
-    const lockedRegistration = loadBrokerRegistration({
+    const loadedLockedRegistration = loadBrokerRegistration({
       endpoint: registration.broker.endpoint,
       brokerIdentity: registration.broker.pidIdentity,
       env: options.env ?? process.env
     });
+    const lockedRegistration = /** @type {RegisteredBrokerRegistration} */ (loadedLockedRegistration);
     if (
-      lockedRegistration.registered !== true ||
+      loadedLockedRegistration.registered !== true ||
       lockedRegistration.brokerKey !== registration.brokerKey ||
       lockedRegistration.registryDir !== registration.registryDir
     ) {

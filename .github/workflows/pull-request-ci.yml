@@ -46,8 +46,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex
+      - name: Check version metadata
+        run: npm run check-version
+
+      - name: Report pinned Codex CLI version
+        run: npx --no-install codex --version
 
       - name: Run test suite
         run: npm test
@@ -55,8 +58,8 @@ jobs:
       - name: Run build
         run: npm run build
 
-  # Advisory floor check: engines claims >=20, so one leg actually runs it.
-  ci-node-floor:
+  # Supported floor check: engines claims >=20, so one required leg runs it.
+  ci_node_floor:
     name: CI (ubuntu-latest, node 20)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -77,8 +80,32 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Codex CLI
-        run: npm install -g @openai/codex
+      - name: Check version metadata
+        run: npm run check-version
+
+      - name: Report pinned Codex CLI version
+        run: npx --no-install codex --version
 
       - name: Run test suite
         run: npm test
+
+  # This is the only context branch protection needs. It remains stable as
+  # the required OS matrix evolves and fails unless every matrix leg passed;
+  # a skipped downstream job would otherwise count as a successful check.
+  required-ci:
+    name: Required CI
+    if: ${{ always() }}
+    needs: [ci, ci_node_floor]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Linux and Windows CI leg
+        shell: bash
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
+          NODE_FLOOR_RESULT: ${{ needs.ci_node_floor.result }}
+        run: |
+          if [ "$CI_RESULT" != "success" ] || [ "$NODE_FLOOR_RESULT" != "success" ]; then
+            echo "Required CI matrix result: $CI_RESULT; Node 20 floor result: $NODE_FLOOR_RESULT"
+            exit 1
+          fi

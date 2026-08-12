@@ -6,6 +6,11 @@
  * @typedef {import("./app-server-protocol").ThreadStartParams} ThreadStartParams
  * @typedef {import("./app-server-protocol").Turn} Turn
  * @typedef {import("./app-server-protocol").UserInput} UserInput
+ * @typedef {Error & {
+ *   code?: string,
+ *   appServerCleanupOutcome?: unknown,
+ *   completedResult?: unknown
+ * }} AppServerCleanupError
  * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null }) => void)} ProgressReporter
  * @typedef {{
  *   threadId: string,
@@ -716,38 +721,96 @@ async function connectAppServerClient(cwd, options) {
   return client;
 }
 
+function attachPublishedAppServerCleanup(error, client, completedResult) {
+  if (client?.transport !== "direct" || client?.ownershipPublished !== true || client.cleanupOutcome?.verified !== false) {
+    return error;
+  }
+  const cleanupError = /** @type {AppServerCleanupError} */ (
+    error instanceof Error ? error : new Error(String(error))
+  );
+  cleanupError.appServerCleanupOutcome = client.cleanupOutcome;
+  if (completedResult !== undefined) {
+    cleanupError.completedResult = completedResult;
+  }
+  return cleanupError;
+}
+
+export async function runAppServerClientOperation(client, fn) {
+  let completedResult;
+  let operationError = null;
+  try {
+    completedResult = await fn(client);
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    await client.close();
+  } catch (error) {
+    client.cleanupOutcome ??= {
+      attempted: true,
+      delivered: false,
+      verified: false,
+      degraded: true,
+      survivors: []
+    };
+    operationError ??= error;
+  }
+
+  if (client?.transport === "direct" && client?.ownershipPublished === true && client.cleanupOutcome?.verified === false) {
+    const cleanupError = /** @type {AppServerCleanupError} */ (
+      operationError instanceof Error
+        ? operationError
+        : new Error("Unable to verify direct Codex app-server cleanup; ownership records were preserved for retry.")
+    );
+    cleanupError.code ??= "APP_SERVER_CLEANUP_UNVERIFIED";
+    throw attachPublishedAppServerCleanup(cleanupError, client, completedResult);
+  }
+  if (operationError) {
+    throw operationError;
+  }
+  return completedResult;
+}
+
 async function withAppServer(cwd, fn, options = {}) {
   let client = null;
+  const directOwnershipOptions = {
+    gatedBrokerChild: options.gatedBrokerChild === true,
+    onAppServerOwnership: options.onAppServerOwnership,
+    onAppServerCleanupOutcome: options.onAppServerCleanupOutcome
+  };
   try {
-    client = await connectAppServerClient(cwd);
+    client = await connectAppServerClient(cwd, {
+      disableBroker: options.disableBroker === true,
+      ...directOwnershipOptions
+    });
     announceTransportFallback(client, options.onDegraded);
-    const result = await fn(client);
-    await client.close();
-    return result;
+    return await runAppServerClientOperation(client, fn);
   } catch (error) {
-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
+    const brokerRequested =
+      options.disableBroker !== true &&
+      (client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]));
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
       (client?.transport === "broker" && error?.rpcCode === BROKER_OWNERSHIP_RPC_CODE) ||
       (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
 
-    if (client) {
+    if (client && !client.closed) {
       await client.close().catch(() => {});
-      client = null;
     }
+    client = null;
 
     if (!shouldRetryDirect) {
       throw error;
     }
 
-    const directClient = await connectAppServerClient(cwd, { disableBroker: true });
+    const directClient = await connectAppServerClient(cwd, {
+      disableBroker: true,
+      ...directOwnershipOptions
+    });
     directClient.transportFallback = transportFallbackReasonForError(error);
     announceTransportFallback(directClient, options.onDegraded);
-    try {
-      return await fn(directClient);
-    } finally {
-      await directClient.close();
-    }
+    return runAppServerClientOperation(directClient, fn);
   }
 }
 
@@ -1278,6 +1341,10 @@ export async function runAppServerTurn(cwd, options = {}) {
       effort: options.effort ?? null
     };
   }, {
+    disableBroker: options.disableBroker === true,
+    gatedBrokerChild: options.gatedBrokerChild === true,
+    onAppServerOwnership: options.onAppServerOwnership,
+    onAppServerCleanupOutcome: options.onAppServerCleanupOutcome,
     onDegraded: (_reason, message) => {
       options.onProgress?.({ message, phase: null, stderrMessage: "" });
     }

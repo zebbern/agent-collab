@@ -109,6 +109,7 @@ test("companion help and --help document every subcommand and the real flags", (
     assert.match(result.stdout, /\btask .*--model <model\|spark>/);
     assert.match(result.stdout, /\btask .*--effort <none\|minimal\|low\|medium\|high\|xhigh\|max>/);
     assert.match(result.stdout, /\btask .*--prompt-file <path>/);
+    assert.match(result.stdout, /--profile fast uses gpt-5\.3-codex-spark at medium effort/i);
     // Profiles are task/rescue only: the review usage line must not advertise --profile.
     const reviewUsageLine = result.stdout
       .split("\n")
@@ -207,7 +208,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(readme, /`spark`, the plugin maps that to `gpt-5\.3-codex-spark`/i);
   assert.match(readme, /--profile <deep\|fast>/);
   assert.match(readme, /\| `deep` \| `gpt-5\.6-sol` \| `xhigh` \|/);
-  assert.match(readme, /\| `fast` \| `gpt-5\.3-codex-spark`.*\| unset \(Codex's default\) \|/);
+  assert.match(readme, /\| `fast` \| `gpt-5\.3-codex-spark`.*\| `medium` \|/);
   assert.match(readme, /`--profile` supplies the defaults; an explicit `--model` on the same invocation overrides the profile's model, and an explicit `--effort` overrides the profile's effort/i);
   assert.match(readme, /No `--profile` and no explicit flags behaves exactly as before: Codex's own defaults apply/i);
   assert.match(readme, /`review` and `adversarial-review` reject `--profile`/i);
@@ -331,7 +332,8 @@ test("SECURITY.md cannot rot: every referenced path exists and the private repor
 
 test("the PR template checklist tracks the repo's real gates", () => {
   const template = fs.readFileSync(path.join(ROOT, ".github", "PULL_REQUEST_TEMPLATE.md"), "utf8");
-  assert.match(template, /npm test/);
+  assert.match(template, /npm run verify/);
+  assert.match(template, /no\s+`UNVERIFIED`\s+leg/i);
   assert.match(template, /byte-identical/);
   assert.ok(fs.existsSync(path.join(ROOT, "tests", "chassis-drift.test.mjs")));
   assert.match(template, /live-fired/);

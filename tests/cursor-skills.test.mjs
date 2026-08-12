@@ -33,6 +33,15 @@ test("cursor task and rescue argument hints advertise --profile", () => {
   assert.match(task, /There is no `--effort` flag/);
 });
 
+test("cursor task docs state that --write is confirmation control, not write permission", () => {
+  const task = read("commands/task.md");
+  const readme = fs.readFileSync(path.join(PLUGIN, "..", "..", "README.md"), "utf8");
+
+  assert.match(task, /can modify files even without `--write`/i);
+  assert.match(readme, /can modify files even without\s+`--write`/i);
+  assert.match(readme, /`--write` only\s+removes Cursor's per-command confirmation/i);
+});
+
 test("cursor help advertises profiles on task only", () => {
   const companion = read("scripts/cursor-companion.mjs");
   const taskLine = companion.split("\n").find((line) => /companion\.mjs task \[/.test(line));

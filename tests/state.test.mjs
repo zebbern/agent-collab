@@ -333,6 +333,38 @@ test("saveState preserves the cancel flag of a pruned job", () => {
   assert.equal(fs.existsSync(path.join(jobsDir, "job-0.cancelled")), true);
 });
 
+test("saveState preserves unresolved jobs ahead of terminal history at the cap", () => {
+  const workspace = makeTempDir();
+  const unresolved = {
+    id: "job-unresolved-oldest",
+    status: "failed",
+    phase: "cleanup-pending",
+    pid: 47401,
+    cleanupOutcome: { verified: false },
+    cleanupFailure: "cleanup remains unverified",
+    updatedAt: "2026-07-28T07:00:00.000Z"
+  };
+  writeJobFile(workspace, unresolved.id, unresolved);
+  const terminal = Array.from({ length: 50 }, (_, index) => ({
+    id: `job-terminal-${index}`,
+    status: "completed",
+    phase: "done",
+    updatedAt: new Date(Date.UTC(2026, 6, 28, 8, index)).toISOString()
+  }));
+
+  saveState(workspace, {
+    version: 1,
+    config: { stopReviewGate: false },
+    jobs: [unresolved, ...terminal]
+  });
+
+  const saved = loadState(workspace);
+  assert.equal(saved.jobs.length, 50);
+  assert.equal(saved.jobs.some((job) => job.id === unresolved.id), true);
+  assert.equal(fs.existsSync(resolveJobFile(workspace, unresolved.id)), true);
+  assert.equal(saved.jobs.some((job) => job.id === "job-terminal-0"), false);
+});
+
 test("atomic writes leave no temporary files behind", () => {
   const workspace = makeTempDir();
   const updatedAt = "2026-01-01T00:00:00.000Z";
@@ -523,7 +555,8 @@ test("a stale snapshot save cannot resurrect a cancelled job", () => {
   upsertJob(workspace, { id: "task-race", status: "cancelled", pid: null });
 
   const staleJob = staleSnapshot.jobs.find((job) => job.id === "task-race");
-  staleJob.phase = "verifying";
+  staleJob.status = "completed";
+  staleJob.phase = "done";
   saveState(workspace, staleSnapshot);
 
   const finalJob = listJobs(workspace).find((job) => job.id === "task-race");
@@ -531,14 +564,51 @@ test("a stale snapshot save cannot resurrect a cancelled job", () => {
   assert.equal(finalJob.pid ?? null, null);
 });
 
-test("upsertJob refuses to revive a terminal job", () => {
+test("upsertJob keeps cancellation authoritative over later transitions", () => {
   const workspace = makeTempDir();
   upsertJob(workspace, { id: "task-terminal", status: "cancelled", pid: null });
   upsertJob(workspace, { id: "task-terminal", status: "running", pid: 5151, phase: "starting" });
+  upsertJob(workspace, { id: "task-terminal", status: "completed", pid: null, phase: "done" });
 
   const job = listJobs(workspace).find((entry) => entry.id === "task-terminal");
   assert.equal(job.status, "cancelled");
   assert.equal(job.pid ?? null, null);
+});
+
+test("verified cleanup facts and a completed cancellation are monotonic", () => {
+  const workspace = makeTempDir();
+  const verified = { attempted: true, delivered: true, verified: true };
+  upsertJob(workspace, {
+    id: "task-cleanup-monotonic",
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    processIdentity: "5152@worker",
+    cleanupOutcome: verified,
+    appServerCleanupOutcome: verified,
+    wslReap: { reaped: true },
+    cleanupFailure: null
+  });
+  upsertJob(workspace, {
+    id: "task-cleanup-monotonic",
+    status: "cancelled",
+    phase: "cleanup-pending",
+    pid: 5152,
+    processIdentity: "5152@worker",
+    cleanupOutcome: { attempted: true, delivered: false, verified: false },
+    appServerCleanupOutcome: { attempted: false, delivered: false, verified: false },
+    wslReap: { reaped: false, survivors: [5252] },
+    cleanupFailure: "stale concurrent cleanup failure"
+  });
+
+  const job = listJobs(workspace).find((entry) => entry.id === "task-cleanup-monotonic");
+  assert.equal(job.status, "cancelled");
+  assert.equal(job.phase, "cancelled");
+  assert.equal(job.pid, null);
+  assert.equal(job.cleanupFailure, null);
+  assert.equal(job.cleanupOutcome.verified, true);
+  assert.equal(job.appServerCleanupOutcome.verified, true);
+  assert.equal(job.wslReap.reaped, true);
 });
 
 test("the state dir is private: 0o700 dir, 0o600 lock/cancel/log", (t) => {

@@ -511,10 +511,247 @@ function rebuildJobsFromJobFiles(cwd) {
   return pruneJobs(jobs);
 }
 
+function requiresCleanup(job) {
+  const hasAppServerOwnership =
+    Number.isFinite(job?.appServerPid) ||
+    Boolean(job?.appServerProcessIdentity) ||
+    Boolean(job?.appServerOwnershipSnapshot);
+  return (
+    job?.status === "queued" ||
+    job?.status === "running" ||
+    job?.phase === "cleanup-pending" ||
+    (typeof job?.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+    job?.cleanupOutcome?.verified === false ||
+    job?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && job?.appServerCleanupOutcome?.verified !== true) ||
+    (job?.status === "cancelled" && Number.isFinite(job?.wslAgentPid) && job?.wslReap?.reaped !== true)
+  );
+}
+
 function pruneJobs(jobs) {
-  return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+  const sorted = [...jobs].sort((left, right) =>
+    String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))
+  );
+  const active = sorted.filter(requiresCleanup);
+  const terminal = sorted.filter((job) => !requiresCleanup(job));
+  // Cleanup ownership is a recovery contract, not history. Never evict it to
+  // make room for inert terminal records; the cap applies to retained history
+  // after every unresolved job has been preserved.
+  return [...active, ...terminal.slice(0, Math.max(0, MAX_JOBS - active.length))];
+}
+
+function preferVerifiedOutcome(current, candidate) {
+  if (candidate?.verified === true) {
+    return candidate;
+  }
+  if (current?.verified === true) {
+    return current;
+  }
+  return candidate ?? current;
+}
+
+function preferReapedOutcome(current, candidate) {
+  if (candidate?.reaped === true) {
+    return candidate;
+  }
+  if (current?.reaped === true) {
+    return current;
+  }
+  return candidate ?? current;
+}
+
+function ownershipSnapshotKey(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return "";
+  }
+  const members = Array.isArray(snapshot.members)
+    ? snapshot.members
+        .map((member) => `${member?.pid ?? "?"}@${member?.identity ?? "?"}`)
+        .sort()
+        .join(",")
+    : "";
+  return [
+    snapshot.rootPid ?? "?",
+    snapshot.rootIdentity ?? "?",
+    snapshot.processGroupId ?? "?",
+    snapshot.sessionId ?? "?",
+    members
+  ].join("|");
+}
+
+function workerOwnershipKey(job) {
+  const identity = job?.processIdentity ?? job?.ownershipSnapshot?.rootIdentity ?? null;
+  const pid = Number.isFinite(job?.pid) ? job.pid : job?.ownershipSnapshot?.rootPid;
+  const root = identity ? `identity:${identity}` : Number.isFinite(pid) ? `pid:${pid}` : null;
+  return root ? `${root}|snapshot:${identity ? ownershipSnapshotKey(job?.ownershipSnapshot) : ""}` : null;
+}
+
+function appServerOwnershipKey(job) {
+  const identity = job?.appServerProcessIdentity ?? job?.appServerOwnershipSnapshot?.rootIdentity ?? null;
+  const pid = Number.isFinite(job?.appServerPid) ? job.appServerPid : job?.appServerOwnershipSnapshot?.rootPid;
+  const root = identity ? `identity:${identity}` : Number.isFinite(pid) ? `pid:${pid}` : null;
+  return root ? `${root}|snapshot:${ownershipSnapshotKey(job?.appServerOwnershipSnapshot)}` : null;
+}
+
+function wslOwnershipKey(job) {
+  return Number.isFinite(job?.wslAgentPid)
+    ? `${job.wslAgentPid}|${job.wslAgentStartTime ?? "?"}`
+    : null;
+}
+
+function ownershipGenerationChanged(current, previous) {
+  return [workerOwnershipKey, appServerOwnershipKey, wslOwnershipKey].some((keyFor) => {
+    const currentKey = keyFor(current);
+    return currentKey !== null && currentKey !== keyFor(previous);
+  });
+}
+
+function snapshotMemberKeys(snapshot) {
+  return new Set(
+    Array.isArray(snapshot?.members)
+      ? snapshot.members.map((member) => `${member?.pid ?? "?"}@${member?.identity ?? "?"}`)
+      : []
+  );
+}
+
+function containsEveryMember(container, subset) {
+  for (const member of subset) {
+    if (!container.has(member)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function resolveSnapshotCleanupGeneration(
+  recordRoot,
+  otherRoot,
+  recordSnapshot,
+  otherSnapshot,
+  recordOutcome,
+  otherOutcome
+) {
+  if (!recordRoot) {
+    return otherRoot
+      ? { source: "other", snapshot: otherSnapshot, outcome: otherOutcome }
+      : { source: "record", snapshot: recordSnapshot, outcome: recordOutcome };
+  }
+  if (otherRoot && recordRoot !== otherRoot) {
+    // A job has one worker and, for persistent Codex tasks, one direct
+    // app-server root. A different already-canonical root is therefore newer
+    // than a whole-record stale write and must not be replaced.
+    return { source: "other", snapshot: otherSnapshot, outcome: otherOutcome };
+  }
+  if (!otherRoot) {
+    return { source: "record", snapshot: recordSnapshot, outcome: recordOutcome };
+  }
+  if (!recordSnapshot && otherSnapshot) {
+    return { source: "other", snapshot: otherSnapshot, outcome: otherOutcome };
+  }
+  if (recordSnapshot && !otherSnapshot) {
+    return { source: "record", snapshot: recordSnapshot, outcome: recordOutcome };
+  }
+  if (recordSnapshot && otherSnapshot) {
+    const recordMembers = snapshotMemberKeys(recordSnapshot);
+    const otherMembers = snapshotMemberKeys(otherSnapshot);
+    const recordContainsOther = containsEveryMember(recordMembers, otherMembers);
+    const otherContainsRecord = containsEveryMember(otherMembers, recordMembers);
+    if (recordContainsOther && otherContainsRecord) {
+      return {
+        source: "record",
+        snapshot: recordSnapshot,
+        outcome: preferVerifiedOutcome(otherOutcome, recordOutcome)
+      };
+    }
+    if (recordContainsOther) {
+      return { source: "record", snapshot: recordSnapshot, outcome: recordOutcome };
+    }
+    if (otherContainsRecord) {
+      return { source: "other", snapshot: otherSnapshot, outcome: otherOutcome };
+    }
+    {
+      const members = new Map();
+      for (const member of [...(otherSnapshot.members ?? []), ...(recordSnapshot.members ?? [])]) {
+        members.set(`${member?.pid ?? "?"}@${member?.identity ?? "?"}`, member);
+      }
+      return {
+        source: "merged",
+        snapshot: { ...otherSnapshot, ...recordSnapshot, members: [...members.values()] },
+        outcome: null
+      };
+    }
+  }
+  return {
+    source: "record",
+    snapshot: recordSnapshot,
+    outcome: preferVerifiedOutcome(otherOutcome, recordOutcome)
+  };
+}
+
+function mergeDurableCleanupFacts(record, other) {
+  const merged = { ...record };
+  const recordWorkerRoot = workerOwnershipKey(record)?.split("|snapshot:")[0] ?? null;
+  const otherWorkerRoot = workerOwnershipKey(other)?.split("|snapshot:")[0] ?? null;
+  const worker = !recordWorkerRoot && !other?.processIdentity && !other?.ownershipSnapshot
+    ? { source: "record", snapshot: record?.ownershipSnapshot ?? null, outcome: record?.cleanupOutcome }
+    : resolveSnapshotCleanupGeneration(
+        recordWorkerRoot,
+        otherWorkerRoot,
+        record?.ownershipSnapshot ?? null,
+        other?.ownershipSnapshot ?? null,
+        record?.cleanupOutcome,
+        other?.cleanupOutcome
+      );
+  if (worker.source === "other") {
+    merged.pid = other?.pid;
+    merged.processIdentity = other?.processIdentity;
+  }
+  if (
+    worker.snapshot != null ||
+    Object.hasOwn(record ?? {}, "ownershipSnapshot") ||
+    Object.hasOwn(other ?? {}, "ownershipSnapshot")
+  ) {
+    merged.ownershipSnapshot = worker.snapshot;
+  } else {
+    delete merged.ownershipSnapshot;
+  }
+  merged.cleanupOutcome = worker.outcome ?? null;
+
+  const appServer = resolveSnapshotCleanupGeneration(
+    appServerOwnershipKey(record)?.split("|snapshot:")[0] ?? null,
+    appServerOwnershipKey(other)?.split("|snapshot:")[0] ?? null,
+    record?.appServerOwnershipSnapshot ?? null,
+    other?.appServerOwnershipSnapshot ?? null,
+    record?.appServerCleanupOutcome,
+    other?.appServerCleanupOutcome
+  );
+  if (appServer.source === "other") {
+    merged.appServerPid = other?.appServerPid;
+    merged.appServerProcessIdentity = other?.appServerProcessIdentity;
+  }
+  if (
+    appServer.snapshot != null ||
+    Object.hasOwn(record ?? {}, "appServerOwnershipSnapshot") ||
+    Object.hasOwn(other ?? {}, "appServerOwnershipSnapshot")
+  ) {
+    merged.appServerOwnershipSnapshot = appServer.snapshot;
+  } else {
+    delete merged.appServerOwnershipSnapshot;
+  }
+  merged.appServerCleanupOutcome = appServer.outcome ?? null;
+
+  const recordWslKey = wslOwnershipKey(record);
+  const otherWslKey = wslOwnershipKey(other);
+  if ((!recordWslKey && otherWslKey) || (recordWslKey && otherWslKey && recordWslKey !== otherWslKey)) {
+    merged.wslAgentPid = other?.wslAgentPid;
+    merged.wslAgentStartTime = other?.wslAgentStartTime;
+    merged.wslReap = other?.wslReap ?? null;
+  } else {
+    merged.wslReap = recordWslKey === otherWslKey
+      ? preferReapedOutcome(other?.wslReap, record?.wslReap) ?? null
+      : record?.wslReap ?? null;
+  }
+  return merged;
 }
 
 function removeFileIfExists(filePath) {
@@ -582,12 +819,42 @@ function saveStateUnlocked(cwd, state) {
   // job reached a terminal status must not resurrect it — for each incoming
   // non-terminal job whose on-disk record is already terminal, the on-disk
   // record wins wholesale (status, pid, and all).
+  const previousById = new Map(previousJobs.map((job) => [job.id, job]));
   const terminalById = new Map(
     previousJobs.filter((job) => isTerminalJobStatus(job?.status)).map((job) => [job.id, job])
   );
-  const guardedJobs = (state.jobs ?? []).map((job) =>
-    terminalById.has(job?.id) && !isTerminalJobStatus(job?.status) ? terminalById.get(job.id) : job
-  );
+  const guardedJobs = (state.jobs ?? []).map((job) => {
+    const terminal = terminalById.get(job?.id);
+    const previous = previousById.get(job?.id);
+    let merged = mergeDurableCleanupFacts(job, previous);
+    const ownershipChanged = ownershipGenerationChanged(merged, previous);
+    if (!terminal) {
+      return merged;
+    }
+    // Cancellation is the authoritative outcome once cleanup has verified.
+    // A worker that finishes concurrently may still attempt a completed or
+    // failed terminal write after cancel committed; that later writer must
+    // not replace the cancellation merely because both statuses are terminal.
+    if (terminal.status === "cancelled" && job?.status !== "cancelled") {
+      return mergeDurableCleanupFacts(terminal, job);
+    }
+    if (
+      terminal.status === "cancelled" &&
+      terminal.phase === "cancelled" &&
+      job?.status === "cancelled" &&
+      !ownershipChanged
+    ) {
+      // A successful cancellation is final. A slower concurrent cleanup may
+      // still report an unverified root, but it cannot put the job back into
+      // cleanup-pending or restore a pid/failure after another actor verified
+      // every required root.
+      return mergeDurableCleanupFacts(terminal, job);
+    }
+    if (!isTerminalJobStatus(job?.status)) {
+      merged = mergeDurableCleanupFacts(terminal, job);
+    }
+    return merged;
+  });
   const nextJobs = pruneJobs(guardedJobs);
   const nextState = {
     version: STATE_VERSION,
@@ -643,9 +910,14 @@ export function upsertJob(cwd, jobPatch) {
       return;
     }
     const existing = state.jobs[existingIndex];
-    if (isTerminalJobStatus(existing.status) && jobPatch.status != null && !isTerminalJobStatus(jobPatch.status)) {
+    if (
+      isTerminalJobStatus(existing.status) &&
+      jobPatch.status != null &&
+      (!isTerminalJobStatus(jobPatch.status) || (existing.status === "cancelled" && jobPatch.status !== "cancelled"))
+    ) {
       // Refuse to revive a terminal job: a late worker or progress writer
-      // must never flip cancelled/failed/completed back to running/queued.
+      // must never flip cancelled/failed/completed back to running/queued,
+      // and a late terminal worker write must never replace cancellation.
       return;
     }
     state.jobs[existingIndex] = {

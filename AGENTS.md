@@ -8,7 +8,7 @@ JSDoc types — no build step for runtime code, no dependencies beyond dev tools
 ## Commands
 
 ```bash
-npm run verify                          # THE pre-merge gate: build + native suite + Linux suite in docker
+npm run verify                          # THE pre-merge gate: versions + build + native suite + Linux suite in docker
 npm test                                # full suite (~2 min; caps file concurrency at 8)
 node --test tests/<file>.test.mjs       # one file
 node --test --test-name-pattern="..." tests/<file>.test.mjs   # one test
@@ -31,13 +31,14 @@ npm run build                           # regenerates app-server types + tsc che
   low-core ones. Run a single file directly with `node --test tests/<f>`.
 - Linux behavior is reproduced exactly by `docker run node:22` with the repo
   copied in; ubuntu CI will agree with it.
-- **`npm run verify` is the merge gate.** GitHub Actions is not currently
-  dispatching CI for this repo, so the gate is local: build, the native suite,
-  and the full suite on Linux in docker (the Linux leg runs the ~40
-  win32-guarded tests the Windows run skips, so the two legs together cover
-  more than either alone). A leg that cannot run is reported `UNVERIFIED` and
-  the gate prints `INCOMPLETE` — never silently "passed". Add
-  `-- --no-linux` only when deliberately skipping docker.
+- **`npm run verify` is the local merge gate; `Required CI` is the
+  complementary remote gate and must be required in branch protection.** The local gate runs version metadata, build,
+  the native suite, and the full suite on Linux in docker (the Linux leg runs
+  the ~40 win32-guarded tests the Windows run skips, so the two legs together
+  cover more than either alone). A leg that cannot run is reported
+  `UNVERIFIED`, the gate prints `INCOMPLETE`, and the process exits 2 — never
+  silently "passed" to a human or automation. Run
+  `npm run verify:no-linux` only when deliberately skipping docker.
 - Do **not** stream the docker leg's TAP output back over inherited stdio.
   Doing so reproducibly failed 7 timing-sensitive shared-broker e2e tests that
   pass every time otherwise — the pipe backpressure was being measured, not
@@ -47,8 +48,8 @@ npm run build                           # regenerates app-server types + tsc che
 ## Hard rules
 
 - **`main` is branch-protected.** Direct pushes are rejected, even for admins.
-  Work on a branch, open a PR, and use `gh pr merge --auto --squash`; both CI
-  checks (ubuntu + windows) must pass. Watch runs with
+  Work on a branch, open a PR, and use `gh pr merge --auto --squash`; the
+  `Required CI` aggregate (Ubuntu, Windows, and the Node 20 floor) must pass. Watch runs with
   `gh run watch --exit-status <run-id>` for the head SHA — do not poll
   PR-level check summaries (they show stale results right after a push).
 - **Plain commit messages. No AI attribution** — no Co-Authored-By trailers,

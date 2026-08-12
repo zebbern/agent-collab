@@ -72,6 +72,14 @@ test("state hygiene checks surface cleanup-pending jobs, dead workers, stale loc
     cleanupFailure: "ownership records were preserved for retry"
   });
   upsertJob(workspace, { id: "task-dead", status: "running", pid: 5151 });
+  upsertJob(workspace, {
+    id: "task-terminal-cleanup",
+    status: "failed",
+    phase: "failed",
+    pid: 5252,
+    cleanupOutcome: { verified: false },
+    cleanupFailure: "late terminal write retained cleanup evidence"
+  });
   writeJobFile(workspace, "task-pending", { id: "task-pending" });
 
   const stateDir = resolveStateDir(workspace);
@@ -94,6 +102,7 @@ test("state hygiene checks surface cleanup-pending jobs, dead workers, stale loc
 
   assert.equal(byId.get("jobs-cleanup-pending").status, "warning");
   assert.match(byId.get("jobs-cleanup-pending").details.join(" "), /task-pending/);
+  assert.match(byId.get("jobs-cleanup-pending").details.join(" "), /task-terminal-cleanup/);
   assert.match(byId.get("jobs-cleanup-pending").message, /\/codex:cancel/);
   assert.equal(byId.get("jobs-likely-dead").status, "warning");
   assert.match(byId.get("jobs-likely-dead").details.join(" "), /task-dead/);

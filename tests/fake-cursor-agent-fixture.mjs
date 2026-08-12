@@ -15,6 +15,7 @@ import { writeExecutable } from "./helpers.mjs";
 //   final answer must be reassembled from the assistant chunks.
 // - "slow": the terminal result only arrives after a long delay, leaving a
 //   live process for cancel tests to kill.
+// - "signal-on-version": the availability probe terminates via SIGTERM.
 export function installFakeCursorAgent(binDir, behavior = "turn-ok") {
   const statePath = path.join(binDir, "fake-cursor-state.json");
   const scriptPath = path.join(binDir, "cursor-agent");
@@ -51,6 +52,9 @@ function readFlagValue(args, flag) {
 const args = process.argv.slice(2);
 
 if (args[0] === "--version") {
+  if (BEHAVIOR === "signal-on-version") {
+    process.kill(process.pid, "SIGTERM");
+  }
   console.log("2026.07.23-fake");
   process.exit(0);
 }

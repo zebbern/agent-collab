@@ -23,7 +23,7 @@ function filterJobsForCurrentSession(jobs, options = {}) {
   if (!sessionId) {
     return jobs;
   }
-  return jobs.filter((job) => job.sessionId === sessionId);
+  return jobs.filter((job) => job.sessionId === sessionId || job.sessionLifetime === "persistent");
 }
 
 function getJobTypeLabel(job) {
@@ -249,6 +249,23 @@ function expectedIdentityFor(job) {
   return typeof job?.processIdentity === "string" && job.processIdentity ? job.processIdentity : null;
 }
 
+function isActiveJobRecord(job) {
+  const hasAppServerOwnership =
+    Number.isFinite(job?.appServerPid) ||
+    Boolean(job?.appServerProcessIdentity) ||
+    Boolean(job?.appServerOwnershipSnapshot);
+  return (
+    job?.status === "queued" ||
+    job?.status === "running" ||
+    job?.phase === "cleanup-pending" ||
+    (typeof job?.cleanupFailure === "string" && job.cleanupFailure.length > 0) ||
+    job?.cleanupOutcome?.verified === false ||
+    job?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && job?.appServerCleanupOutcome?.verified !== true) ||
+    (job?.status === "cancelled" && Number.isFinite(job?.wslAgentPid) && job?.wslReap?.reaped !== true)
+  );
+}
+
 export function getLiveJobPids(jobs, options = {}) {
   const candidates = jobs.filter((job) => Number.isFinite(job?.pid));
   if (candidates.length === 0) {
@@ -263,7 +280,7 @@ export function getLiveJobPids(jobs, options = {}) {
 }
 
 function deriveJobLiveness(job, options = {}) {
-  if (job.status !== "queued" && job.status !== "running") {
+  if (!isActiveJobRecord(job)) {
     return null;
   }
 
@@ -395,15 +412,15 @@ export function buildStatusSnapshot(cwd, options = {}) {
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter(isActiveJobRecord);
   const livePids = getLiveJobPids(activeJobs, options);
   const running = activeJobs.map((job) => enrichJob(job, { maxProgressLines, workspaceRoot, livePids }));
 
-  const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running") ?? null;
+  const latestFinishedRaw = jobs.find((job) => !isActiveJobRecord(job)) ?? null;
   const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { maxProgressLines, workspaceRoot, livePids }) : null;
 
   const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
-    .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
+    .filter((job) => !isActiveJobRecord(job) && job.id !== latestFinished?.id)
     .map((job) => enrichJob(job, { maxProgressLines, workspaceRoot, livePids }));
 
   return {
@@ -441,7 +458,7 @@ export function resolveResultJob(cwd, reference) {
   const selected = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled",
+    (job) => !isActiveJobRecord(job) && (job.status === "completed" || job.status === "failed" || job.status === "cancelled"),
     { allowMissing: true }
   );
 
@@ -460,7 +477,7 @@ export function resolveResultJob(cwd, reference) {
   const active = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "queued" || job.status === "running",
+    isActiveJobRecord,
     { allowMissing: true }
   );
   if (active) {
@@ -477,7 +494,7 @@ export function resolveResultJob(cwd, reference) {
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter(isActiveJobRecord);
 
   if (reference) {
     // Same distinction the result path needs: a finished job is not a missing

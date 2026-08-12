@@ -264,6 +264,22 @@ test("renderJobStatusReport omits progress signals and the liveness marker when 
   assert.doesNotMatch(output, /likely dead/);
 });
 
+test("renderJobStatusReport directs cleanup-pending jobs to cancel, not result", () => {
+  const output = renderJobStatusReport({
+    id: "task-cleanup-retry",
+    status: "completed",
+    phase: "cleanup-pending",
+    cleanupFailure: "owned descendants remain",
+    kindLabel: "task",
+    title: "Codex Task",
+    jobClass: "task"
+  });
+
+  assert.match(output, /Cancel: \/codex:cancel task-cleanup-retry/);
+  assert.doesNotMatch(output, /Result: \/codex:result task-cleanup-retry/);
+  assert.doesNotMatch(output, /Review changes:/);
+});
+
 test("renderJobStatusReport shows the transport line only when the job record carries it", () => {
   const fallback = renderJobStatusReport({
     id: "task-79",

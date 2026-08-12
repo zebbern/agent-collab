@@ -16,7 +16,7 @@ export function runCommand(command, args = [], options = {}) {
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status: result.status,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
@@ -615,6 +615,14 @@ export function getWindowsProcessIdentity(pid, options = {}) {
 
 export function isWindowsProcessIdentity(identity) {
   return typeof identity === "string" && identity.includes(WINDOWS_IDENTITY_MARKER);
+}
+
+export function pidFromWindowsProcessIdentity(identity) {
+  if (!isWindowsProcessIdentity(identity)) {
+    return null;
+  }
+  const pid = Number(identity.slice(0, identity.indexOf(WINDOWS_IDENTITY_MARKER)));
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 // 5 seconds in 100ns FILETIME units: the slack allowed when comparing an

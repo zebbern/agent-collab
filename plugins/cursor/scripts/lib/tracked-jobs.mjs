@@ -149,11 +149,93 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+const CANONICAL_CLEANUP_FIELDS = [
+  "pid",
+  "processIdentity",
+  "ownershipSnapshot",
+  "ownershipCaptureFailed",
+  "cleanupOutcome",
+  "appServerPid",
+  "appServerProcessIdentity",
+  "appServerOwnershipSnapshot",
+  "appServerCleanupOutcome",
+  "cleanupFailure",
+  "wslAgentPid",
+  "wslAgentStartTime",
+  "wslReap"
+];
+
+function readCanonicalTrackedRecord(workspaceRoot, jobId, fallback) {
+  const indexed = listJobs(workspaceRoot).find((candidate) => candidate.id === jobId) ?? fallback;
+  const stored = readStoredJobOrNull(workspaceRoot, jobId) ?? {};
+  const record = { ...stored, ...indexed };
+  for (const field of CANONICAL_CLEANUP_FIELDS) {
+    if (Object.hasOwn(indexed, field)) {
+      record[field] = indexed[field];
+    } else {
+      delete record[field];
+    }
+  }
+  // The locked index is the cancellation linearization point. A job-file
+  // writer can lag or race it, but must never hide an authoritative cancel.
+  if (indexed.status === "cancelled") {
+    record.status = "cancelled";
+    record.phase = indexed.phase ?? "cancelled";
+  }
+  return record;
+}
+
+function hasUnresolvedCleanup(record) {
+  const hasAppServerOwnership =
+    Number.isFinite(record?.appServerPid) ||
+    Boolean(record?.appServerProcessIdentity) ||
+    Boolean(record?.appServerOwnershipSnapshot);
+  return (
+    record?.phase === "cleanup-pending" ||
+    (typeof record?.cleanupFailure === "string" && record.cleanupFailure.length > 0) ||
+    record?.cleanupOutcome?.verified === false ||
+    record?.appServerCleanupOutcome?.verified === false ||
+    (hasAppServerOwnership && record?.appServerCleanupOutcome?.verified !== true) ||
+    (record?.status === "cancelled" && Number.isFinite(record?.wslAgentPid) && record?.wslReap?.reaped !== true)
+  );
+}
+
+function preferVerifiedCleanupOutcome(current, candidate) {
+  if (candidate?.verified === true) {
+    return candidate;
+  }
+  if (current?.verified === true) {
+    return current;
+  }
+  return candidate ?? current ?? null;
+}
+
 function createJobCancelledError(jobId) {
-  const error = new Error(`Job ${jobId} was cancelled before execution.`);
+  const error = /** @type {Error & { code?: string }} */ (new Error(`Job ${jobId} was cancelled before execution.`));
   error.name = "JobCancelledError";
   error.code = JOB_CANCELLED_CODE;
   return error;
+}
+
+function throwIfAuthoritativelyCancelled(workspaceRoot, jobId, source) {
+  const authoritative = Array.isArray(source?.jobs)
+    ? source.jobs.find((candidate) => candidate.id === jobId)
+    : source;
+  if (authoritative?.status !== "cancelled" || authoritative?.phase === "cleanup-pending") {
+    return;
+  }
+  const stored = readStoredJobOrNull(workspaceRoot, jobId) ?? {};
+  // Preserve any richer stored payload, but let the locked index win every
+  // lifecycle field so file and index converge after either write ordering.
+  writeJobFile(workspaceRoot, jobId, {
+    ...stored,
+    ...authoritative,
+    status: "cancelled",
+    phase: authoritative.phase ?? "cancelled",
+    pid: null
+  });
+  removeCancelFlag(workspaceRoot, jobId);
+  throw createJobCancelledError(jobId);
 }
 
 /**
@@ -167,7 +249,7 @@ export function captureRunnerOwnership(pid = process.pid) {
   try {
     const processIdentity =
       getProcessIdentity(pid) ??
-      (process.platform === "win32" ? getOwnWindowsProcessIdentity(pid) : null);
+      (process.platform === "win32" ? getOwnWindowsProcessIdentity() : null);
     ownership = processIdentity ? { processIdentity } : { ownershipCaptureFailed: true };
   } catch {
     ownership = { ownershipCaptureFailed: true };
@@ -202,8 +284,10 @@ export async function runTrackedJob(job, runner, options = {}) {
     pid: process.pid,
     logFile: options.logFile ?? job.logFile ?? null
   };
+  const upsert = options.upsertJobImpl ?? upsertJob;
   writeJobFile(job.workspaceRoot, job.id, runningRecord);
-  upsertJob(job.workspaceRoot, runningRecord);
+  const runningState = upsert(job.workspaceRoot, runningRecord);
+  throwIfAuthoritativelyCancelled(job.workspaceRoot, job.id, runningState);
 
   try {
     if (hasCancelFlag(job.workspaceRoot, job.id)) {
@@ -212,52 +296,111 @@ export async function runTrackedJob(job, runner, options = {}) {
     const execution = await runner();
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
+    const existing = readCanonicalTrackedRecord(job.workspaceRoot, job.id, runningRecord);
+    if (existing.status === "cancelled" && existing.phase !== "cleanup-pending") {
+      removeCancelFlag(job.workspaceRoot, job.id);
+      throw createJobCancelledError(job.id);
+    }
+    const cleanupPending = hasUnresolvedCleanup(existing);
     writeJobFile(job.workspaceRoot, job.id, {
-      ...runningRecord,
+      ...existing,
       status: completionStatus,
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
-      pid: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
+      pid: cleanupPending ? existing.pid ?? runningRecord.pid : null,
+      phase: cleanupPending ? "cleanup-pending" : completionStatus === "completed" ? "done" : "failed",
       completedAt,
       result: execution.payload,
       rendered: execution.rendered
     });
-    upsertJob(job.workspaceRoot, {
+    const completedState = upsert(job.workspaceRoot, {
       id: job.id,
       status: completionStatus,
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       summary: execution.summary,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
+      phase: cleanupPending ? "cleanup-pending" : completionStatus === "completed" ? "done" : "failed",
+      pid: cleanupPending ? existing.pid ?? runningRecord.pid : null,
+      ...(cleanupPending
+        ? {
+            ...(existing.cleanupOutcome ? { cleanupOutcome: existing.cleanupOutcome } : {}),
+            ...(existing.appServerCleanupOutcome ? { appServerCleanupOutcome: existing.appServerCleanupOutcome } : {}),
+            cleanupFailure: existing.cleanupFailure ?? "Process cleanup remains unverified."
+          }
+        : {}),
       completedAt
     });
+    throwIfAuthoritativelyCancelled(job.workspaceRoot, job.id, completedState);
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
+    const existing = readCanonicalTrackedRecord(job.workspaceRoot, job.id, runningRecord);
+    const cleanupPendingCancellation = existing.status === "cancelled" && existing.phase === "cleanup-pending";
+    if (existing.status === "cancelled" && existing.phase !== "cleanup-pending") {
+      throwIfAuthoritativelyCancelled(job.workspaceRoot, job.id, existing);
+    }
     const completedAt = nowIso();
-    const terminalStatus = error?.code === JOB_CANCELLED_CODE ? "cancelled" : "failed";
+    const appServerCleanupOutcome = preferVerifiedCleanupOutcome(
+      existing.appServerCleanupOutcome,
+      error?.appServerCleanupOutcome
+    );
+    const existingCleanupPending = hasUnresolvedCleanup(existing);
+    const cleanupPending = appServerCleanupOutcome?.verified === false || existingCleanupPending;
+    const completedExecution = cleanupPending ? error?.completedResult ?? null : null;
+    const terminalStatus = completedExecution
+      ? completedExecution.exitStatus === 0 ? "completed" : "failed"
+      : cleanupPendingCancellation ? "cancelled"
+      : error?.code === JOB_CANCELLED_CODE ? "cancelled" : "failed";
+    const cleanupFailure = cleanupPending ? errorMessage : null;
     writeJobFile(job.workspaceRoot, job.id, {
       ...existing,
       status: terminalStatus,
-      phase: terminalStatus,
+      phase: cleanupPending ? "cleanup-pending" : terminalStatus,
       errorMessage,
-      pid: null,
+      ...(cleanupPending
+        ? {
+            ...(appServerCleanupOutcome ? { appServerCleanupOutcome } : {}),
+            ...(existing.cleanupOutcome ? { cleanupOutcome: existing.cleanupOutcome } : {}),
+            cleanupFailure: existing.cleanupFailure ?? cleanupFailure
+          }
+        : {}),
+      ...(completedExecution
+        ? {
+            threadId: completedExecution.threadId ?? null,
+            turnId: completedExecution.turnId ?? null,
+            result: completedExecution.payload,
+            rendered: completedExecution.rendered
+          }
+        : {}),
+      pid: cleanupPending ? existing.pid ?? runningRecord.pid : null,
       completedAt,
       logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
     });
-    upsertJob(job.workspaceRoot, {
+    const failedState = upsert(job.workspaceRoot, {
       id: job.id,
       status: terminalStatus,
-      phase: terminalStatus,
-      pid: null,
+      phase: cleanupPending ? "cleanup-pending" : terminalStatus,
+      pid: cleanupPending ? existing.pid ?? runningRecord.pid : null,
       errorMessage,
+      ...(cleanupPending
+        ? {
+            ...(appServerCleanupOutcome ? { appServerCleanupOutcome } : {}),
+            ...(existing.cleanupOutcome ? { cleanupOutcome: existing.cleanupOutcome } : {}),
+            cleanupFailure: existing.cleanupFailure ?? cleanupFailure
+          }
+        : {}),
+      ...(completedExecution
+        ? {
+            threadId: completedExecution.threadId ?? null,
+            turnId: completedExecution.turnId ?? null,
+            summary: completedExecution.summary
+          }
+        : {}),
       completedAt
     });
-    if (terminalStatus === "cancelled") {
+    throwIfAuthoritativelyCancelled(job.workspaceRoot, job.id, failedState);
+    if (terminalStatus === "cancelled" && !cleanupPending) {
       // The worker has now durably acknowledged the cancellation. Until this
       // point the tombstone must survive state pruning so a worker that read
       // the queued request cannot cross the read-to-start race.

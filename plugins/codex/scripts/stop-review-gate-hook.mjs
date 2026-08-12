@@ -109,7 +109,7 @@ function runStopReview(cwd, input = {}) {
     timeout: STOP_REVIEW_TIMEOUT_MS
   });
 
-  if (result.error?.code === "ETIMEDOUT") {
+  if (result.error && /** @type {NodeJS.ErrnoException} */ (result.error).code === "ETIMEDOUT") {
     return {
       ok: false,
       reason:
