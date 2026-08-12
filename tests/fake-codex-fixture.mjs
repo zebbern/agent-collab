@@ -28,7 +28,19 @@ const readline = require("node:readline");
 	}
 
 function saveState(state) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  const tempPath = STATE_PATH + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(state, null, 2));
+    fs.renameSync(tempPath, STATE_PATH);
+  } finally {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
 }
 
 function requiresExperimental(field, message, state) {

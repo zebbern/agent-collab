@@ -21,6 +21,7 @@ export function installFakeCursorAgent(binDir, behavior = "turn-ok") {
   const scriptPath = path.join(binDir, "cursor-agent");
   const source = `#!/usr/bin/env node
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 
 const STATE_PATH = ${JSON.stringify(statePath)};
 const BEHAVIOR = ${JSON.stringify(behavior)};
@@ -34,7 +35,19 @@ function loadState() {
 }
 
 function saveState(state) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  const tempPath = STATE_PATH + "." + process.pid + "." + crypto.randomUUID() + ".tmp";
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(state, null, 2));
+    fs.renameSync(tempPath, STATE_PATH);
+  } finally {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
 }
 
 function send(event) {
