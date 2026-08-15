@@ -83,8 +83,42 @@ test("continue is not exposed as a user-facing command", () => {
     "review.md",
     "setup.md",
     "status.md",
+    "task.md",
     "transfer.md"
   ]);
+});
+
+test("task command forwards raw arguments once and leaves background execution to the companion", () => {
+  const source = read("commands/task.md");
+
+  assert.match(source, /disable-model-invocation:\s*true/);
+  assert.match(source, /allowed-tools:\s*Bash\(node:\*\)/);
+  assert.match(source, /argument-hint:.*\[--background\].*\[--write\].*--resume-last\|--resume\|--fresh/);
+  const invocation = /node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/codex-companion\.mjs" task "\$ARGUMENTS"/g;
+  assert.equal(source.match(invocation)?.length, 1);
+  assert.equal(source.match(/\$ARGUMENTS/g)?.length, 1);
+  assert.match(source, /Present the command output to the user exactly as returned/i);
+  assert.match(source, /Preserve the raw arguments unchanged/i);
+  assert.match(source, /Do not remove `--background` or turn it into Claude-side background execution/i);
+  assert.match(source, /companion enqueues the detached persistent worker and returns its job ID/i);
+  assert.match(source, /slash command remains inline/i);
+  assert.doesNotMatch(source, /run_in_background\s*:/);
+  assert.doesNotMatch(source, /\bBash\s*\(\s*\{/);
+  assert.doesNotMatch(source, /subagent_type\s*:/);
+  assert.doesNotMatch(source, /task-resume-candidate/);
+  assert.doesNotMatch(source, /allowed-tools:.*\bAgent\b/);
+});
+
+test("README documents the direct persistent task workflow", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+
+  assert.match(readme, /\| \*\*`codex`\*\*.*\/codex:task/);
+  assert.match(readme, /\| `\/codex:task` \|/);
+  assert.match(readme, /#### `\/codex:task`/);
+  assert.match(readme, /\/codex:task --background --fresh map this repository's architecture and identify the main runtime entrypoints/);
+  assert.match(readme, /close Claude and reopen the same repository/i);
+  assert.match(readme, /\/codex:status <job-id> --wait/);
+  assert.match(readme, /\/codex:result <job-id>/);
 });
 
 test("help command runs the companion help inline and returns it verbatim", () => {
