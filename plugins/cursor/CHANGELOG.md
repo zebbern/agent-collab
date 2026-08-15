@@ -1,12 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
-- Companion-enqueued background tasks are explicitly persistent and remain
-  discoverable and cancellable from later Claude sessions; old foreground jobs
-  stay session-scoped.
-- Signal-terminated availability and authentication probes retain their null
-  exit status and fail closed instead of reporting Cursor ready.
+- Background tasks now survive the Claude session that launched them and stay
+  discoverable, readable, and cancellable from later sessions; foreground
+  reviews remain session-scoped.
+- Interrupted availability and authentication probes no longer report Cursor
+  ready when the check never completed.
 
 ## 0.5.2
 

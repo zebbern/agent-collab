@@ -528,7 +528,10 @@ rl.on("line", (line) => {
 	          prompt
 	        };
 	        saveState(state);
-	        send({ id: message.id, result: { turn: buildTurn(turnId) } });
+	        const bufferSubagentNotifications = BEHAVIOR === "with-buffered-subagent";
+	        if (!bufferSubagentNotifications) {
+	          send({ id: message.id, result: { turn: buildTurn(turnId) } });
+	        }
 
         if (BEHAVIOR === "streaming-helper-after-response") {
           setTimeout(() => {
@@ -552,6 +555,7 @@ rl.on("line", (line) => {
 
         if (
           BEHAVIOR === "with-subagent" ||
+          BEHAVIOR === "with-buffered-subagent" ||
           BEHAVIOR === "with-late-subagent-message" ||
           BEHAVIOR === "with-subagent-no-main-turn-completed"
         ) {
@@ -655,6 +659,9 @@ rl.on("line", (line) => {
           }
           if (BEHAVIOR !== "with-subagent-no-main-turn-completed") {
             send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+          }
+          if (bufferSubagentNotifications) {
+            send({ id: message.id, result: { turn: buildTurn(turnId) } });
           }
           break;
         }

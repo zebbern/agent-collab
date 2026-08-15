@@ -1,6 +1,6 @@
 {
   "name": "goal",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Long-horizon project goals for Claude Code: an attended /goal loop that advances one increment at a time, delegating through the codex and cursor plugins.",
   "author": {
     "name": "zebbern"
