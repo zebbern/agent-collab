@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+- Retrospectives now cross-check ledger dispositions against the goal files,
+  so split or incomplete history is surfaced instead of producing a confident
+  but misleading conclusion.
+- Timing analysis flags both very short runs and long background or overnight
+  gaps instead of averaging them into an unrepresentative duration.
+
 ## 0.3.1
 
 - One canonical ledger root, healed splits: the ledger state root no longer

@@ -5,18 +5,16 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
-## Unreleased
+## 1.0.6+fork.8
 
-- Companion-enqueued `task --background` jobs now survive the Claude session
-  that launched them. Persistent workers use a private app-server so
-  SessionEnd can tear down its shared broker without killing the task; later
-  sessions can discover, read, or cancel the job, while foreground reviews
-  remain session-scoped. Session cleanup merges against fresh locked state
-  after process teardown, so it cannot overwrite a worker's concurrent PID or
-  remove a newly enqueued job.
-- Signal-terminated subprocess probes retain their null exit status and fail
-  closed instead of being reported as exit 0, preserving process-enumeration
-  and ownership-verification guarantees.
+- Background tasks now survive the Claude session that launched them. Start a
+  long-running `task --background`, end the session, then discover, read, or
+  cancel it from a later session; foreground reviews remain session-scoped.
+- Subagent progress keeps meaningful labels such as `design-challenger` when
+  thread metadata arrives before the turn response, instead of falling back
+  to opaque ids such as `thr_2`.
+- Interrupted process probes no longer report a false successful exit, so
+  cancellation and cleanup results stay trustworthy.
 
 ## 1.0.6+fork.7
 
