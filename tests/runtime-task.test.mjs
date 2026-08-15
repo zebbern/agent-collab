@@ -807,10 +807,10 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
   assert.match(log, /Handled the requested task/);
 });
 
-test("task logs subagent reasoning and messages with a subagent prefix", () => {
+test("task preserves subagent labels when thread metadata is buffered before the turn response", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  installFakeCodex(binDir, "with-subagent");
+  installFakeCodex(binDir, "with-buffered-subagent");
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
   run("git", ["add", "README.md"], { cwd: repo });
