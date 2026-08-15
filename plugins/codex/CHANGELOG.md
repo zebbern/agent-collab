@@ -5,6 +5,12 @@ Versions up to and including 1.0.6 are upstream releases of
 `1.0.6+fork.1` onward are changes made in this community fork by
 [@zebbern](https://github.com/zebbern).
 
+## 1.0.6+fork.9
+
+- New `/codex:task --background` command directly starts Codex work that
+  survives the launching Claude session. The Quick Start now demonstrates
+  closing Claude, reopening the repository, and collecting the stored result.
+
 ## 1.0.6+fork.8
 
 - Background tasks now survive the Claude session that launched them. Start a
