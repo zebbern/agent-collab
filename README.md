@@ -130,7 +130,7 @@ Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. It uses 
 
 Delegate investigation, a fix request, or follow-up work directly to Codex. Without `--background`, the command stays in the foreground and returns Codex's output when it finishes. With `--background`, the companion starts a detached persistent worker and returns a job ID that remains available after you close Claude and reopen the same repository; use `/codex:status <job-id> --wait` and then `/codex:result <job-id>` to collect it.
 
-Use `--write` only when Codex may modify the repository. Use `--resume-last` to continue the latest task for this repository, `--resume <session-id>` to continue a particular Codex session, or `--fresh` to start a new one. `--profile <deep|fast>` chooses paired model and effort defaults; `--model <model|spark>` and `--effort <none|minimal|low|medium|high|xhigh|max>` select or override them.
+Use `--write` only when Codex may modify the repository. `--resume` and `--resume-last` are aliases that continue the latest task from the current Claude session; `--fresh` starts a new thread. `--profile <deep|fast>` chooses paired model and effort defaults; `--model <model|spark>` and `--effort <none|minimal|low|medium|high|xhigh|max>` select or override them.
 
 ```bash
 /codex:task map this repository's architecture and identify the main runtime entrypoints

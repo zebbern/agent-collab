@@ -111,6 +111,7 @@ test("task command forwards raw arguments once and leaves background execution t
 
 test("README documents the direct persistent task workflow", () => {
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  const taskSection = readme.match(/#### `\/codex:task`([\s\S]*?)#### `\/codex:rescue`/)?.[1];
 
   assert.match(readme, /\| \*\*`codex`\*\*.*\/codex:task/);
   assert.match(readme, /\| `\/codex:task` \|/);
@@ -119,6 +120,10 @@ test("README documents the direct persistent task workflow", () => {
   assert.match(readme, /close Claude and reopen the same repository/i);
   assert.match(readme, /\/codex:status <job-id> --wait/);
   assert.match(readme, /\/codex:result <job-id>/);
+  assert.ok(taskSection, "expected a /codex:task usage section");
+  assert.match(taskSection, /`--resume` and `--resume-last` are aliases that continue the latest task from the current Claude session/i);
+  assert.match(taskSection, /`--fresh` starts a new thread/i);
+  assert.doesNotMatch(taskSection, /--resume <session-id>/);
 });
 
 test("help command runs the companion help inline and returns it verbatim", () => {
