@@ -526,7 +526,7 @@ test("review logs reasoning summaries and review output to the job log", () => {
   assert.match(log, /Reviewed uncommitted changes\./);
 });
 
-test("task persists run telemetry and status renders progress signals", () => {
+test("task waits for delayed terminal telemetry before persisting progress signals", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "task-with-telemetry");

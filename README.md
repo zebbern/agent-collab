@@ -28,7 +28,7 @@ One marketplace, three plugins:
 
 | Plugin | Delegates to | Highlights |
 | --- | --- | --- |
-| **`codex`** | [OpenAI Codex](https://developers.openai.com/codex/) (`codex` CLI) | `/codex:review`, `/codex:adversarial-review`, `/codex:rescue`, session transfer, optional stop-review gate. Community fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) with Windows fixes. |
+| **`codex`** | [OpenAI Codex](https://developers.openai.com/codex/) (`codex` CLI) | `/codex:task`, `/codex:review`, `/codex:adversarial-review`, `/codex:rescue`, session transfer, optional stop-review gate. Community fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) with Windows fixes. |
 | **`cursor`** | [Cursor](https://cursor.com) (`cursor-agent` CLI) | `/cursor:review`, `/cursor:task`, ownership-verified cancel, WSL support on Windows, resolved-model + token-usage recording. |
 | **`goal`** | Long-horizon goals | `/goal:set`, `/goal:step` — one increment per invocation, delegating through the other two plugins, with mechanical state and dispositions. |
 
@@ -58,12 +58,17 @@ Reload, then check readiness:
 /cursor:setup
 ```
 
-A first run that shows the whole loop:
+A first run that starts durable work you can collect after restarting Claude:
 
 ```bash
-/codex:review --background
-/codex:status
-/codex:result
+/codex:task --background --fresh map this repository's architecture and identify the main runtime entrypoints
+```
+
+Copy the returned job ID, close Claude, then reopen the same repository and run:
+
+```bash
+/codex:status <job-id> --wait
+/codex:result <job-id>
 ```
 
 > For the **official** OpenAI plugin instead of this fork, use `/plugin marketplace add openai/codex-plugin-cc`.
@@ -91,6 +96,7 @@ A first run that shows the whole loop:
 | --- | --- |
 | `/codex:review` | Read-only review of your working tree or branch (`--base <ref>`, `--background`) |
 | `/codex:adversarial-review` | Steerable challenge review — takes focus text, questions design decisions |
+| `/codex:task` | Delegate investigation, fixes, or follow-up work directly to Codex (`--background`, `--write`, resume/fresh, profile/model/effort flags) |
 | `/codex:rescue` | Hand a task to Codex (`--profile <deep|fast>`, `--model`, `--effort`, `--resume`, `--background`) |
 | `/codex:transfer` | Turn the current Claude session into a resumable Codex thread |
 | `/codex:status` / `/codex:result` / `/codex:cancel` | Track, read, and stop background jobs |
@@ -118,6 +124,19 @@ Pressure-tests assumptions, tradeoffs, failure modes, and alternatives. It uses 
 ```bash
 /codex:adversarial-review --base main challenge whether this was the right caching and retry design
 /codex:adversarial-review --background look for race conditions and question the chosen approach
+```
+
+#### `/codex:task`
+
+Delegate investigation, a fix request, or follow-up work directly to Codex. Without `--background`, the command stays in the foreground and returns Codex's output when it finishes. With `--background`, the companion starts a detached persistent worker and returns a job ID that remains available after you close Claude and reopen the same repository; use `/codex:status <job-id> --wait` and then `/codex:result <job-id>` to collect it.
+
+Use `--write` only when Codex may modify the repository. `--resume` and `--resume-last` are aliases that continue the latest task from the current Claude session; `--fresh` starts a new thread. `--profile <deep|fast>` chooses paired model and effort defaults; `--model <model|spark>` and `--effort <none|minimal|low|medium|high|xhigh|max>` select or override them.
+
+```bash
+/codex:task map this repository's architecture and identify the main runtime entrypoints
+/codex:task --background --fresh investigate why the tests started failing
+/codex:task --write fix the failing test
+/codex:task --resume-last apply the top fix from the last run
 ```
 
 #### `/codex:rescue`
