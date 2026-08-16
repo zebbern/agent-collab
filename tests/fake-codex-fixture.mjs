@@ -179,7 +179,7 @@ function saveImportLedger(ledger) {
   fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
 }
 
-function emitTurnCompleted(threadId, turnId, item) {
+function emitTurnCompleted(threadId, turnId, item, completionDelayMs = 0) {
   const items = Array.isArray(item) ? item : [item];
   send({ method: "turn/started", params: { threadId, turn: buildTurn(turnId) } });
   for (const entry of items) {
@@ -190,7 +190,14 @@ function emitTurnCompleted(threadId, turnId, item) {
       send({ method: "item/completed", params: { threadId, turnId, item: entry.completed } });
     }
   }
-  send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, "completed") } });
+  const complete = () => {
+    send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, "completed") } });
+  };
+  if (completionDelayMs > 0) {
+    setTimeout(complete, completionDelayMs);
+  } else {
+    complete();
+  }
 }
 
 function emitTurnCompletedLater(threadId, turnId, item, delayMs) {
@@ -733,6 +740,10 @@ rl.on("line", (line) => {
 	            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	          }, 5000);
 	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
+	        } else if (BEHAVIOR === "task-with-telemetry") {
+	          // Emit items immediately, then hold only the authoritative terminal
+	          // payload well past captureTurn's collaboration fallback window.
+	          emitTurnCompleted(thread.id, turnId, items, 3000);
 	        } else if (BEHAVIOR === "slow-task" || BEHAVIOR === "slow-task-with-helper-child") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
 	        } else {

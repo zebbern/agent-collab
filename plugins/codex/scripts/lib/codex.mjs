@@ -26,6 +26,7 @@
  *   finalTurn: Turn | null,
  *   completed: boolean,
  *   inferredCompletion: boolean,
+ *   collaborationObserved: boolean,
  *   finalAnswerSeen: boolean,
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
@@ -381,6 +382,7 @@ function createTurnCaptureState(threadId, options = {}) {
     finalTurn: null,
     completed: false,
     inferredCompletion: false,
+    collaborationObserved: false,
     finalAnswerSeen: false,
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
@@ -432,7 +434,9 @@ function completeTurn(state, turn = null, options = {}) {
 }
 
 function scheduleInferredCompletion(state) {
-  if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
+  // The fallback exists for collaboration runs whose root turn/completed can
+  // be absent. Root-only runs must wait for their authoritative terminal turn.
+  if (state.completed || state.finalTurn || !state.collaborationObserved || !state.finalAnswerSeen) {
     return;
   }
 
@@ -443,7 +447,7 @@ function scheduleInferredCompletion(state) {
   clearCompletionTimer(state);
   state.completionTimer = setTimeout(() => {
     state.completionTimer = null;
-    if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
+    if (state.completed || state.finalTurn || !state.collaborationObserved || !state.finalAnswerSeen) {
       return;
     }
     if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
@@ -466,6 +470,7 @@ function belongsToTurn(state, message) {
 
 function recordItem(state, item, lifecycle, threadId = null) {
   if (item.type === "collabAgentToolCall") {
+    state.collaborationObserved = true;
     if (!threadId || threadId === state.threadId) {
       if (lifecycle === "started" || item.status === "inProgress") {
         state.pendingCollaborations.add(item.id);
@@ -571,6 +576,9 @@ function applyTurnNotification(state, message) {
       });
       break;
     case "turn/started":
+      if ((message.params.threadId ?? null) !== state.threadId) {
+        state.collaborationObserved = true;
+      }
       registerThread(state, message.params.threadId);
       state.threadTurnIds.set(message.params.threadId, message.params.turn.id);
       if ((message.params.threadId ?? null) !== state.threadId) {
