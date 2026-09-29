@@ -26,13 +26,13 @@ The goal plugin is architecturally standalone, deliberately:
   warranted, but the goal companion itself never shells out to `codex` or
   `cursor-agent`. Either delegate plugin can be absent; the goal plugin
   degrades to local work or an honest `blocked` disposition.
-- **Attended-only v1 with single-writer state.** The companion assumes one
-  session at a time and skips the siblings' lock machinery entirely — writes
-  are tmp-file-plus-rename atomic, but nothing arbitrates concurrent writers.
-  Git catches the rest: the goal file is ordinary project content, so a
-  conflicting edit surfaces as a merge conflict, not silent corruption. The
-  unattended, multi-writer case is a bounded, known upgrade (adopt the
-  sibling lock pattern) — not a gap this version pretends to close.
+- **Single-writer state.** The companion assumes one session at a time and
+  skips the siblings' lock machinery entirely — writes are
+  tmp-file-plus-rename atomic, but nothing arbitrates concurrent writers.
+  Attended and scheduled invocations must not overlap. The scheduled recipe
+  requires the runner to stop if another invocation may still be active;
+  scheduling does not add a locking guarantee. Supporting overlapping
+  writers requires a separate upgrade to coordinate state and ledger writes.
 - **`blocked` is a full stop, enforced twice.** `validateGoal` refuses to load
   or save a goal that is `active` while any backlog item is `blocked`, and
   `close --done` independently refuses on any blocked item even if a
