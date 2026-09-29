@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Scheduled steps query PRs in every state and reconcile only one exact,
+  consistent match. Failed, missing, or ambiguous evidence leaves the item
+  in-progress. Scheduled invocations must not overlap.
+- New ledger writes use the filesystem's canonical project path, so Windows
+  case variants and directory aliases no longer split subsequent history.
+  Existing shards associated with the supplied path spelling are merged
+  chronologically, preserving corrupt lines and archived originals. Revisit
+  an older alias with `ledger` to recover its shard; historical spellings
+  cannot be recovered from hashes. Missing or unresolvable directories retain
+  the prior path-based lookup for existing history.
+
 ## 0.3.2
 
 - Retrospectives now cross-check ledger dispositions against the goal files,

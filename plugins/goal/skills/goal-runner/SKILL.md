@@ -30,7 +30,13 @@ Policy:
 - **Unattended never merges.** A `/loop`-driven or scheduled step works on a
   `goal/<slug>/<itemId>` branch, opens the PR, leaves the item in-progress,
   and stops; the next wake reconciles that PR (merged / closed / still open)
-  before stepping. Merging stays human.
+  using `/goal:step`'s all-state JSON query and exact head-branch check.
+  Failed, missing, or ambiguous PR evidence stops the wake without a
+  disposition. Recording a reconciliation also ends the wake. Merging stays
+  human.
+- **One writer per project.** Prevent overlapping scheduled wakes and manual
+  `/goal:step` invocations. If another runner may still be active, stop before
+  changing goal state.
 - **Honest dispositions.** `merged` means the PR merged. Never invent progress,
   never record a disposition that has not actually happened, and if the
   companion or a delegate fails, report that instead of substituting your own

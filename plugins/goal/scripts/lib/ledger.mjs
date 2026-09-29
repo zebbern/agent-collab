@@ -31,7 +31,17 @@ function projectKey(cwd) {
 }
 
 export function stateDir(cwd) {
-  return path.join(stateRoot(), projectKey(cwd));
+  // Native realpath resolves junctions/symlinks and the filesystem's actual
+  // casing on Windows. Lowercasing strings alone would conflate distinct
+  // directories on a case-sensitive filesystem.
+  let resolved = path.resolve(cwd);
+  try {
+    resolved = fs.realpathSync.native(resolved);
+  } catch {
+    // Retain the old lookup when the directory is gone or cannot be resolved,
+    // as the sibling state resolvers do; its existing history still matters.
+  }
+  return path.join(stateRoot(), projectKey(resolved));
 }
 
 function ledgerFile(cwd) {
@@ -56,8 +66,11 @@ function samePath(a, b) {
 // hook no longer exports the var at all), and the pre-install fallback
 // (tmpdir). Only existing files are returned, deduplicated.
 function legacyLedgerFiles(cwd) {
-  const key = projectKey(cwd);
   const canonical = ledgerFile(cwd);
+  // Old keys hashed the caller's spelling. Recover that shard when the alias
+  // is used, as well as canonical-path shards in the former roots. Arbitrary
+  // historical aliases cannot be inferred from their one-way path hashes.
+  const keys = new Set([projectKey(cwd), path.basename(path.dirname(canonical))]);
   const bases = [];
   if (process.env.CLAUDE_PLUGIN_DATA) {
     bases.push(process.env.CLAUDE_PLUGIN_DATA);
@@ -71,12 +84,15 @@ function legacyLedgerFiles(cwd) {
     // No harness plugin-data dir on this machine.
   }
   bases.push(os.tmpdir());
+  const roots = [stateRoot(), ...bases.map((base) => path.join(base, "goal-companion"))];
   const files = [];
-  for (const base of bases) {
-    const file = path.join(base, "goal-companion", key, "ledger.jsonl");
-    if (samePath(file, canonical)) continue;
-    if (files.some((seen) => samePath(seen, file))) continue;
-    if (fs.existsSync(file)) files.push(file);
+  for (const root of roots) {
+    for (const key of keys) {
+      const file = path.join(root, key, "ledger.jsonl");
+      if (samePath(file, canonical)) continue;
+      if (files.some((seen) => samePath(seen, file))) continue;
+      if (fs.existsSync(file)) files.push(file);
+    }
   }
   return files;
 }
@@ -124,14 +140,14 @@ function consolidateLedger(cwd) {
   fs.writeFileSync(tmp, tagged.map((entry) => `${entry.line}\n`).join(""));
   fs.renameSync(tmp, target);
   for (const file of sources) {
-    try {
-      fs.renameSync(file, `${file}.migrated`);
-    } catch {
-      // A stale .migrated marker blocks the rename (Windows refuses to
-      // clobber); the content is already merged, so the source must not
-      // survive to be imported again.
-      fs.unlinkSync(file);
+    // An older installation can write this shard again after migration.
+    // Keep every original instead of overwriting its previous archive (or
+    // deleting the source after a failed rename). Goal state is single-writer.
+    let archive = `${file}.migrated`;
+    for (let suffix = 1; fs.existsSync(archive); suffix += 1) {
+      archive = `${file}.migrated.${suffix}`;
     }
+    fs.renameSync(file, archive);
   }
 }
 

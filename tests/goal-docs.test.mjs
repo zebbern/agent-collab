@@ -75,6 +75,39 @@ test("goal step command pins the unattended operation recipe", () => {
   assert.match(step, /Reconcile before stepping/i);
 });
 
+test("scheduled goal reconciliation queries all PR states and refuses uncertain evidence", () => {
+  const step = read(path.join("commands", "step.md"));
+  assert.match(step, /gh pr list --state all --head "goal\/<slug>\/<itemId>" --json number,state,headRefName,mergedAt/);
+  assert.match(step, /Require exit code 0 and a JSON array containing exactly one PR/);
+  assert.match(step, /positive integer `number` and `headRefName` exactly equal to\s+`goal\/<slug>\/<itemId>`/);
+  assert.match(step, /failed query, invalid or incomplete JSON, no PR,\s+multiple PRs, a different head branch, or inconsistent `state`\/`mergedAt`/);
+  assert.match(step, /stop without recording a disposition\s+or starting another item/);
+  assert.match(step, /Never infer a disposition from an absent PR or\s+choose among multiple PRs/);
+  assert.match(step, /Any other state is unresolved/);
+});
+
+test("scheduled goal reconciliation distinguishes merged, closed unmerged, and open PRs", () => {
+  const step = read(path.join("commands", "step.md"));
+  assert.match(step, /`state: MERGED` with a non-null `mergedAt` →\s+`record <slug> <itemId> --disposition merged --pr <n>`/);
+  assert.match(step, /`state: CLOSED` with `mergedAt: null` →\s+`record <slug> <itemId> --disposition discarded --notes "PR #<n> closed without merge"`/);
+  assert.match(step, /`state: OPEN` with `mergedAt: null` → stop and wait; do not start another\s+increment/);
+  assert.match(step, /After recording merged or discarded, show\s+`status` and stop this wake; only a later invocation may select another item/);
+});
+
+test("scheduled goal policy requires one writer and preserves reconciliation stops", () => {
+  const step = read(path.join("commands", "step.md"));
+  const skill = read(path.join("skills", "goal-runner", "SKILL.md"));
+  for (const source of [step, skill]) {
+    assert.match(source, /One writer per project/);
+    assert.match(source, /Prevent overlapping scheduled wakes and manual\s+`\/goal:step` invocations/);
+    assert.match(source, /If another runner may still be active, stop before\s+changing goal state/);
+  }
+  assert.match(skill, /all-state JSON query and exact head-branch check/);
+  assert.match(skill, /Failed, missing, or ambiguous PR evidence stops the wake without a\s+disposition/);
+  assert.match(skill, /Recording a reconciliation also ends the wake/);
+  assert.match(skill, /Merging stays\s+human/);
+});
+
 test("goal retro command pins its frontmatter and hard rules", () => {
   const retro = read(path.join("commands", "retro.md"));
   assert.match(retro, /^description: Analyze the goal ledger and propose policy improvements$/m);
