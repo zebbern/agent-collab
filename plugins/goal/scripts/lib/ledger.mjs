@@ -3,6 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  commitLedgerMigration,
+  hasPendingLedgerMigration,
+  readLedgerSnapshot,
+  recoverLedgerMigration
+} from "./ledger-migration.mjs";
+
 const ENFORCE_POSIX_MODES = process.platform !== "win32";
 
 /**
@@ -104,24 +111,36 @@ function legacyLedgerFiles(cwd) {
 // them) — consolidation preserves them for readLedger's corrupt-line count,
 // never silently drops them.
 function consolidateLedger(cwd) {
+  const dir = stateDir(cwd);
+  // Recovery comes before discovery: all sources may already be archived,
+  // or this invocation may no longer carry the legacy plugin-data root.
+  if (hasPendingLedgerMigration(dir)) {
+    ensureLedgerStateDir(cwd);
+    recoverLedgerMigration(dir);
+  }
   const sources = legacyLedgerFiles(cwd);
   if (sources.length === 0) return;
+  ensureLedgerStateDir(cwd);
   const target = ledgerFile(cwd);
+  const before = readLedgerSnapshot(target);
+  const snapshots = sources.map((file) => {
+    const contents = readLedgerSnapshot(file);
+    if (contents === null) throw new Error(`Ledger migration source disappeared: ${file}`);
+    return { file, contents };
+  });
   const tagged = [];
-  const collect = (file) => {
-    let raw;
-    try {
-      raw = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
-    }
+  const collect = (raw) => {
+    if (raw === null) return;
     let lastAt = "";
-    for (const line of raw.split("\n")) {
-      if (line.trim() === "") continue;
+    for (let start = 0; start < raw.length;) {
+      const newline = raw.indexOf(10, start);
+      const line = raw.subarray(start, newline === -1 ? raw.length : newline);
+      start = newline === -1 ? raw.length : newline + 1;
+      const text = line.toString("utf8");
+      if (text.trim() === "") continue;
       let at = lastAt;
       try {
-        const parsed = JSON.parse(line);
+        const parsed = JSON.parse(text);
         if (typeof parsed?.at === "string") at = parsed.at;
       } catch {
         // corrupt line: keep lastAt so it stays beside its neighbors
@@ -130,25 +149,13 @@ function consolidateLedger(cwd) {
       tagged.push({ at, line });
     }
   };
-  collect(target);
-  for (const file of sources) collect(file);
+  collect(before);
+  for (const snapshot of snapshots) collect(snapshot.contents);
   // ISO-8601 UTC timestamps order lexicographically; the sort is stable, so
   // ties keep their collection order (canonical first, then sources).
   tagged.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  const dir = ensureLedgerStateDir(cwd);
-  const tmp = path.join(dir, "ledger.jsonl.consolidating");
-  fs.writeFileSync(tmp, tagged.map((entry) => `${entry.line}\n`).join(""));
-  fs.renameSync(tmp, target);
-  for (const file of sources) {
-    // An older installation can write this shard again after migration.
-    // Keep every original instead of overwriting its previous archive (or
-    // deleting the source after a failed rename). Goal state is single-writer.
-    let archive = `${file}.migrated`;
-    for (let suffix = 1; fs.existsSync(archive); suffix += 1) {
-      archive = `${file}.migrated.${suffix}`;
-    }
-    fs.renameSync(file, archive);
-  }
+  const output = Buffer.concat(tagged.flatMap((entry) => [entry.line, Buffer.from("\n")]));
+  commitLedgerMigration(dir, before, snapshots, output);
 }
 
 // Private-dir doctrine, built goal-locally (the chassis is mirrored, not

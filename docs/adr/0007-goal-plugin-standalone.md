@@ -33,6 +33,14 @@ The goal plugin is architecturally standalone, deliberately:
   requires the runner to stop if another invocation may still be active;
   scheduling does not add a locking guarantee. Supporting overlapping
   writers requires a separate upgrade to coordinate state and ledger writes.
+- **Recoverable ledger migration.** A private write-ahead record contains the
+  merged bytes, input hashes, and selected archive names before any original
+  is changed. Reads and appends finish that recorded operation before looking
+  for new shards. Recovery refuses changed or ambiguous evidence and preserves
+  the files for inspection. It handles process interruption and filesystem
+  errors, not power-loss durability, concurrent writers, or exactly-once
+  application appends. It cannot infer or remove duplicates created by older
+  migrations without a recovery record.
 - **`blocked` is a full stop, enforced twice.** `validateGoal` refuses to load
   or save a goal that is `active` while any backlog item is `blocked`, and
   `close --done` independently refuses on any blocked item even if a
