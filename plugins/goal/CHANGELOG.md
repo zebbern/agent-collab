@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3
 
 - Ledger migration now publishes a write-ahead record before replacing the
   canonical ledger or archiving sources. A later read or append resumes an
