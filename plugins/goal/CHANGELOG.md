@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Ledger migration now publishes a write-ahead record before replacing the
+  canonical ledger or archiving sources. A later read or append resumes an
+  interrupted migration without importing events twice, preserving legitimate
+  duplicates, corrupt bytes, and original archives. Changed or missing
+  evidence and malformed recovery records stop migration without guessing.
+  Recovery covers process interruption and filesystem errors under the
+  existing single-writer contract; concurrent writers and power-loss durability
+  remain outside that guarantee.
 - Scheduled steps query PRs in every state and reconcile only one exact,
   consistent match. Failed, missing, or ambiguous evidence leaves the item
   in-progress. Scheduled invocations must not overlap.
